@@ -1,12 +1,16 @@
 // ./index.js
-require("dotenv").config();
+const path = require("path");
+require("dotenv").config({
+  path: path.join(__dirname, ".", ".env"),
+  quiet: true,
+});
 
 const { Client, Events } = require("discord.js");
 const { GatewayIntentBits } = require("./config/GatewayIntentBits");
 const { onReady } = require("./events/onReady");
 const { onInteraction } = require("./events/onInteraction");
 const { onMessage } = require("./events/onMessage");
-const { validateEnv } = require("./utils/validateEnv");
+const { validateEnv } = require("./utils/discord/validateEnv");
 const log = require("./utils/logger");
 
 function fatal(message, error) {

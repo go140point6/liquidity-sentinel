@@ -6,11 +6,21 @@ const path = require("path");
 const LOCK_DIR = path.join(__dirname, "..", "locks");
 const STALE_MS = 30 * 60 * 1000; // 30 minutes
 
+// Lazy logger getter — only resolves AFTER dotenv + logger are ready
+function getLogger() {
+  try {
+    return require("./logger");
+  } catch {
+    return null;
+  }
+}
+
 function ensureDir() {
   try {
     fs.mkdirSync(LOCK_DIR, { recursive: true });
   } catch (err) {
-    console.error("[LOCK] Failed to create lock directory:", err);
+    const logger = getLogger();
+    logger?.error("[LOCK] Failed to create lock directory:", err);
     throw err;
   }
 }
@@ -30,6 +40,7 @@ function acquireLock(name) {
 
   const lockPath = path.join(LOCK_DIR, `${name}.lock`);
   const now = Date.now();
+  const logger = getLogger();
 
   // Check for existing lock
   try {
@@ -44,11 +55,11 @@ function acquireLock(name) {
     // Stale lock — attempt cleanup
     try {
       fs.unlinkSync(lockPath);
+      logger?.warn(`[LOCK] Removed stale lock: ${lockPath}`);
     } catch {
       return null;
     }
   } catch (err) {
-    // statSync failed → file likely doesn't exist, continue
     if (err.code !== "ENOENT") {
       return null;
     }
@@ -66,12 +77,12 @@ function acquireLock(name) {
         null,
         2
       ),
-      { flag: "wx" } // fail if file exists
+      { flag: "wx" }
     );
 
+    logger?.debug(`[LOCK] Acquired lock: ${lockPath}`);
     return lockPath;
-  } catch (err) {
-    // Another process beat us to it
+  } catch {
     return null;
   }
 }
@@ -86,8 +97,10 @@ function releaseLock(lockPath) {
 
   try {
     fs.unlinkSync(lockPath);
+    const logger = getLogger();
+    logger?.debug(`[LOCK] Released lock: ${lockPath}`);
   } catch {
-    // Best-effort cleanup; ignore errors
+    // best-effort
   }
 }
 
