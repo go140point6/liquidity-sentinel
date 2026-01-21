@@ -652,6 +652,32 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
   const pos = await pm.positions(tokenIdBN);
 
   const liquidity = BigInt(pos.liquidity.toString());
+  const token0 = pos.token0;
+  const token1 = pos.token1;
+  let dec0 = 18;
+  let dec1 = 18;
+  let sym0 = token0;
+  let sym1 = token1;
+  const fee = Number(pos.fee);
+  const tickLower = Number(pos.tickLower);
+  const tickUpper = Number(pos.tickUpper);
+
+  try {
+    [dec0, dec1] = await Promise.all([
+      getTokenDecimals(provider, token0).catch(() => 18),
+      getTokenDecimals(provider, token1).catch(() => 18),
+    ]);
+  } catch (_) {}
+
+  try {
+    [sym0, sym1] = await Promise.all([
+      getTokenSymbol(provider, token0).catch(() => token0),
+      getTokenSymbol(provider, token1).catch(() => token1),
+    ]);
+  } catch (_) {}
+
+  const pairLabelFallback = dbPairLabel || `${sym0}-${sym1}`;
+
   if (liquidity === 0n) {
     if (verbose) {
       logger.debug(
@@ -674,28 +700,17 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
       protocol,
       wallet: owner,
       walletLabel,
+      pairLabel: pairLabelFallback,
+      priceLower: null,
+      priceUpper: null,
+      currentPrice: null,
+      priceBaseSymbol: sym0,
+      priceQuoteSymbol: sym1,
     });
     return;
   }
 
-  const token0 = pos.token0;
-  const token1 = pos.token1;
-  const fee = Number(pos.fee);
-  const tickLower = Number(pos.tickLower);
-  const tickUpper = Number(pos.tickUpper);
-
-  let pairLabel = dbPairLabel || "";
-  if (!pairLabel) {
-    try {
-      const [sym0, sym1] = await Promise.all([
-        getTokenSymbol(provider, token0).catch(() => token0),
-        getTokenSymbol(provider, token1).catch(() => token1),
-      ]);
-      pairLabel = `${sym0}-${sym1}`;
-    } catch (_) {
-      pairLabel = `${token0}-${token1}`;
-    }
-  }
+  const pairLabel = dbPairLabel || `${sym0}-${sym1}`;
 
   if (verbose) {
     logger.debug("========================================");
@@ -724,6 +739,15 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
   let poolAddr = null;
   let currentTick = null;
 
+  const tickToPrice = (tick) => {
+    if (!Number.isFinite(tick)) return null;
+    return Math.pow(1.0001, tick) * Math.pow(10, dec0 - dec1);
+  };
+
+  const priceLower = tickToPrice(tickLower);
+  const priceUpper = tickToPrice(tickUpper);
+  let currentPrice = null;
+
   try {
     const factoryAddr = await pm.factory();
     if (factoryAddr && factoryAddr !== ethers.ZeroAddress) {
@@ -738,6 +762,7 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
 
         if (Number.isFinite(currentTick)) {
           currentTick = applyLpTickShift(currentTick, tickLower, tickUpper);
+          currentPrice = tickToPrice(currentTick);
           currentStatus =
             currentTick >= tickLower && currentTick < tickUpper ? "IN_RANGE" : "OUT_OF_RANGE";
         }
@@ -769,6 +794,12 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
     protocol,
     wallet: owner,
     walletLabel,
+    pairLabel,
+    priceLower,
+    priceUpper,
+    currentPrice,
+    priceBaseSymbol: sym0,
+    priceQuoteSymbol: sym1,
   });
 
   if (verbose) {

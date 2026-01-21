@@ -301,8 +301,93 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
           ? " ✅"
           : "";
 
+      if (
+        phase === "UPDATED" &&
+        prevStatus === currentStatus &&
+        prevTier === newTier
+      ) {
+        return;
+      }
+
+      const prettyStatus = (s) => (s || "UNKNOWN").toString().replace(/_/g, " ");
+      const statusEmoji = (s) =>
+        ({
+          IN_RANGE: "🟢",
+          OUT_OF_RANGE: "🔴",
+          INACTIVE: "⚪",
+          UNKNOWN: "⚪",
+        }[s] || "⚪");
+      const tierEmoji = (t) =>
+        ({
+          CRITICAL: "🟥",
+          HIGH: "🟧",
+          MEDIUM: "🟨",
+          LOW: "🟩",
+          UNKNOWN: "⬜",
+        }[t] || "⬜");
+      const fmtPrice = (v) => {
+        if (typeof v !== "number" || !Number.isFinite(v)) return "n/a";
+        return v.toFixed(5);
+      };
+      const priceLabel =
+        meta?.priceBaseSymbol && meta?.priceQuoteSymbol
+          ? `${meta.priceQuoteSymbol}/${meta.priceBaseSymbol}`
+          : "";
+      const currentPriceText =
+        meta?.currentPrice != null
+          ? `${fmtPrice(meta.currentPrice)}${priceLabel ? ` ${priceLabel}` : ""}`
+          : "n/a";
+      const statusChanged = prevStatus !== currentStatus;
+      const tierChanged = prevTier !== newTier;
+      const statusValue = `${statusEmoji(currentStatus)} ${prettyStatus(currentStatus)}`;
+      const statusWithPrice = `${statusValue} | Current: ${currentPriceText}`;
+      const tierValue = tierChanged
+        ? `${tierEmoji(prevTier)} ${prevTier} -> ${tierEmoji(newTier)} ${newTier}`
+        : `${tierEmoji(newTier)} ${newTier}`;
+
+      let meaning = "Status unchanged.";
+      if (statusChanged) {
+        if (currentStatus === "IN_RANGE") meaning = "Back in range.";
+        else if (currentStatus === "OUT_OF_RANGE") meaning = "Moved out of range.";
+        else if (currentStatus === "INACTIVE") meaning = "Position is inactive.";
+        else meaning = "Status changed.";
+      } else if (tierChanged) {
+        if (currentStatus === "OUT_OF_RANGE") {
+          if (trend.label === "Improving") meaning = "Still out of range but moving closer to range.";
+          else if (trend.label === "Worsening")
+            meaning = "Still out of range and moving farther from range.";
+          else meaning = "Still out of range.";
+        } else if (currentStatus === "IN_RANGE") {
+          if (newTier === "LOW") meaning = "Still in range (but now comfortably in range).";
+          else if (newTier === "MEDIUM") meaning = "Still in range (but now getting close to edge).";
+          else if (newTier === "HIGH") meaning = "Still in range (but now very close to edge).";
+          else if (newTier === "CRITICAL") meaning = "Still in range (but now at the edge).";
+          else meaning = "Still in range.";
+        } else if (currentStatus === "INACTIVE") {
+          meaning = "Still inactive.";
+        } else {
+          meaning = "Status unchanged.";
+        }
+      }
+
+      const labelFromStatus = () => {
+        if (currentStatus === "IN_RANGE") return { text: "Improving", emoji: "🟢" };
+        if (currentStatus === "OUT_OF_RANGE") return { text: "Worsening", emoji: "🔴" };
+        if (currentStatus === "INACTIVE") return { text: "Inactive", emoji: "⚪" };
+        return { text: "Updated", emoji: "⚪" };
+      };
+      const labelFromTrend = () => {
+        if (trend.label === "Improving") return { text: "Improving", emoji: "🟢" };
+        if (trend.label === "Worsening") return { text: "Worsening", emoji: "🔴" };
+        return { text: "Updated", emoji: "⚪" };
+      };
+      let headline = { text: "Updated", emoji: "⚪" };
+      if (phase === "NEW") headline = { text: "New", emoji: "⚠️" };
+      else if (statusChanged) headline = labelFromStatus();
+      else if (tierChanged) headline = labelFromTrend();
+
       const embed = new EmbedBuilder()
-        .setTitle(`LP Range Alert (${phase}${phaseTag})`)
+        .setTitle(`LP Range Alert - ${headline.text} ${headline.emoji}`)
         .setDescription(message)
         .setColor(phase === "RESOLVED" ? "DarkGrey" : phase === "UPDATED" ? "Orange" : "Red")
         .setTimestamp();
@@ -314,9 +399,21 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
         { name: "Wallet", value: meta?.wallet || "n/a", inline: true },
       ];
       if (meta?.walletLabel) fields.push({ name: "Label", value: meta.walletLabel, inline: true });
+      if (meta?.pairLabel) fields.push({ name: "Pair", value: meta.pairLabel, inline: true });
+      fields.push({
+        name: "Min Price",
+        value: meta?.priceLower != null ? fmtPrice(meta.priceLower) : "n/a",
+        inline: true,
+      });
+      fields.push({
+        name: "Max Price",
+        value: meta?.priceUpper != null ? fmtPrice(meta.priceUpper) : "n/a",
+        inline: true,
+      });
       fields.push(
-        { name: "Status", value: `${prevStatus} -> ${currentStatus}`, inline: false },
-        { name: "Tier", value: `${prevTier} -> ${newTier}`, inline: false }
+        { name: "Status", value: statusWithPrice, inline: false },
+        { name: "Tier", value: tierValue, inline: false },
+        { name: "Meaning", value: meaning, inline: false }
       );
       embed.addFields(fields);
 
@@ -1396,6 +1493,12 @@ async function handleLpRangeAlert(data) {
     protocol,
     wallet,
     walletLabel,
+    pairLabel,
+    priceLower,
+    priceUpper,
+    currentPrice,
+    priceBaseSymbol,
+    priceQuoteSymbol,
   } = data;
 
   const tokenId = String(positionId);
@@ -1439,7 +1542,7 @@ async function handleLpRangeAlert(data) {
         const signature = makeSignature(sigPayload);
         const wouldNotify = !prevActive || prev.signature !== signature;
 
-        const message = `LP is OUT OF RANGE ${protocol}`;
+        const message = `${protocol}`;
         const newLastAlertAtMs = wouldNotify ? nowMs : lastAlertAtMs;
 
         if (!prev.exists) {
@@ -1486,6 +1589,12 @@ async function handleLpRangeAlert(data) {
             positionId: shortenTroveId(tokenId),
             wallet: shortenAddress(wallet),
             walletLabel,
+            pairLabel,
+            priceLower,
+            priceUpper,
+            currentPrice,
+            priceBaseSymbol,
+            priceQuoteSymbol,
             prevStatus,
             currentStatus: "OUT_OF_RANGE",
             prevTier: prevTierU,
@@ -1516,11 +1625,17 @@ async function handleLpRangeAlert(data) {
           lastTier: prevTierU,
         },
         logPrefix: "[LP]",
-        message: `LP pending OUT_OF_RANGE debounce ${protocol}`,
+        message: `${protocol}`,
         meta: {
           positionId: shortenTroveId(tokenId),
           wallet: shortenAddress(wallet),
-            walletLabel,
+          walletLabel,
+          pairLabel,
+            priceLower,
+            priceUpper,
+            currentPrice,
+            priceBaseSymbol,
+            priceQuoteSymbol,
           prevStatus,
           currentStatus: currStatus,
           prevTier: prevTierU,
@@ -1550,7 +1665,7 @@ async function handleLpRangeAlert(data) {
     const allowUpdateNotify =
       wouldNotify && (cooldownOk || escalated) && (tierChanged || statusChanged);
 
-    const message = `LP is OUT OF RANGE ${protocol}`;
+    const message = `${protocol}`;
     const newLastAlertAtMs = allowUpdateNotify ? nowMs : lastAlertAtMs;
 
     if (!wouldNotify) {
@@ -1575,7 +1690,13 @@ async function handleLpRangeAlert(data) {
         meta: {
           positionId: shortenTroveId(tokenId),
           wallet: shortenAddress(wallet),
-            walletLabel,
+          walletLabel,
+          pairLabel,
+            priceLower,
+            priceUpper,
+            currentPrice,
+            priceBaseSymbol,
+            priceQuoteSymbol,
           prevStatus,
           currentStatus: "OUT_OF_RANGE",
           prevTier: prevTierU,
@@ -1628,12 +1749,18 @@ async function handleLpRangeAlert(data) {
       },
       logPrefix: "[LP]",
       message,
-        meta: {
-          positionId: shortenTroveId(tokenId),
-          wallet: shortenAddress(wallet),
-            walletLabel,
-          prevStatus,
-          currentStatus: "OUT_OF_RANGE",
+      meta: {
+        positionId: shortenTroveId(tokenId),
+        wallet: shortenAddress(wallet),
+        walletLabel,
+        pairLabel,
+            priceLower,
+            priceUpper,
+            currentPrice,
+            priceBaseSymbol,
+            priceQuoteSymbol,
+        prevStatus,
+        currentStatus: "OUT_OF_RANGE",
         prevTier: prevTierU,
         newTier: tierU,
         lpRangeTier: tierU,
@@ -1657,8 +1784,7 @@ async function handleLpRangeAlert(data) {
     if (age >= LP_IN_DEBOUNCE_MS) {
       const cooldownOk = nowMs - lastAlertAtMs >= LP_ALERT_COOLDOWN_MS;
 
-      const message =
-        desired === "INACTIVE" ? `LP is now INACTIVE ${protocol}` : `LP is back IN RANGE ${protocol}`;
+      const message = `${protocol}`;
 
       await processAlert({
         userId,
@@ -1681,7 +1807,13 @@ async function handleLpRangeAlert(data) {
         meta: {
           positionId: shortenTroveId(tokenId),
           wallet: shortenAddress(wallet),
-            walletLabel,
+          walletLabel,
+          pairLabel,
+            priceLower,
+            priceUpper,
+            currentPrice,
+            priceBaseSymbol,
+            priceQuoteSymbol,
           prevStatus,
           currentStatus: currStatus,
           prevTier: prevTierU,
@@ -1715,11 +1847,17 @@ async function handleLpRangeAlert(data) {
         lastTier: prevTierU,
       },
       logPrefix: "[LP]",
-      message: `LP pending IN_RANGE debounce ${protocol}`,
+      message: `${protocol}`,
       meta: {
         positionId: shortenTroveId(tokenId),
         wallet: shortenAddress(wallet),
-            walletLabel,
+        walletLabel,
+        pairLabel,
+            priceLower,
+            priceUpper,
+            currentPrice,
+            priceBaseSymbol,
+            priceQuoteSymbol,
         prevStatus,
         currentStatus: currStatus,
         prevTier: prevTierU,
@@ -1750,11 +1888,17 @@ async function handleLpRangeAlert(data) {
       lastTier: tierU,
     },
     logPrefix: "[LP]",
-    message: `LP steady ${protocol}`,
+    message: `${protocol}`,
     meta: {
       positionId: shortenTroveId(tokenId),
       wallet: shortenAddress(wallet),
-            walletLabel,
+      walletLabel,
+      pairLabel,
+            priceLower,
+            priceUpper,
+            currentPrice,
+            priceBaseSymbol,
+            priceQuoteSymbol,
       prevStatus,
       currentStatus: currStatus,
       prevTier: prevTierU,

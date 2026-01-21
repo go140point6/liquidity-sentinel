@@ -1,0 +1,19 @@
+// Type: Word
+// Trigger: !resetverify
+// Required Permission: Admin
+// Folder: COMMANDS
+// Ignore Roles: Unset
+// Runs only in: #bot-commands
+// Channel Used: #bot-commands
+
+$onlyIf[$hasPerms[$authorID;admin]==true;Admins only.]
+
+$let[target;$message[1]]
+$onlyIf[$isNumber[$target]==true;Usage: !resetverify <userID>]
+
+**verifyFails for <@!$target>:**
+Before reset: `$getUserVar[verifyFails;$target]`
+
+$setUserVar[verifyFails;0;$target]
+
+After reset: `$getUserVar[verifyFails;$target]`
