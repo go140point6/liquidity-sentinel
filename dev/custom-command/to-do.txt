@@ -1,0 +1,124 @@
+You’re going to replace the CustomCommand “verify gate” with a small, stand-alone **Node.js (discord.js)** moderation bot that does the same logic but with **persistent storage** and **restart-safe scheduling**, so you don’t get CC’s cache/timeout weirdness.
+
+## What we’re building
+
+A **verification gate** for a Discord server:
+
+**Roles**
+
+* Verified role: **Minion** → `1461547491794227364`
+* Jail role: **Penitent** → `1461547492683284550`
+* Admin log channel: `1461549322779889889`
+
+**Rules**
+
+* On member join, start a deadline timer (test: 1 min; production: 10 min).
+* When deadline hits:
+
+  * If member has **Minion** → do nothing (and reset fails to 0).
+  * If member has **Penitent** → do nothing (they’re jailed).
+  * Otherwise:
+
+    * If this is their **first failure** → increment fail count and **kick**.
+    * If this is their **second failure** → **ban**.
+* When member becomes verified (Minion role added), reset their fail count to **0** and mark them verified.
+
+## Why we’re doing it (what broke with CustomCommand)
+
+CustomCommand bot is unreliable here because:
+
+* `$setTimeout` runs in a separate context with inconsistent “member caching.”
+* CC sometimes can’t resolve members (including the bot’s own guild member), causing errors like “invalid or not cached.”
+* Role/hierarchy lookups in CC were quirky (we had to hardcode role IDs and invert comparisons).
+* Errors weren’t consistently surfaced even with `$redirectErrors`, making troubleshooting painful.
+* You need this to work for real-world scammers who might rejoin and stay idle for hours—CC cache can drop during that time.
+
+A real bot can:
+
+* Use explicit fetches (`guild.members.fetch`) instead of relying on CC cache.
+* Use a real DB (SQLite) to persist `verifyFails` and deadlines.
+* Keep deadlines accurate across restarts.
+* Produce consistent logs and actionable errors.
+
+## Architecture to implement in Node.js
+
+### Discord events you’ll use
+
+* `guildMemberAdd` → create a pending verification record and deadline.
+* `guildMemberUpdate` → detect verified role added (Minion) and reset state.
+
+### Persistent scheduling (restart-safe)
+
+Don’t rely only on `setTimeout`. Use DB-backed deadlines:
+
+1. On join: write `deadline_at = now + timeout_ms` in SQLite.
+2. Run a loop every 15–30 seconds:
+
+   * Query DB for `pending` rows where `deadline_at <= now`.
+   * For each row:
+
+     * Fetch member fresh (or handle “already left”).
+     * Check roles by ID.
+     * Kick/ban accordingly.
+     * Update DB status + timestamps.
+
+(You *can* also use `setTimeout` as a “fast path,” but the periodic DB poll is what makes it reliable.)
+
+## SQLite schema (minimum)
+
+Table: `verification_state`
+
+* `guild_id` TEXT
+* `user_id` TEXT
+* `verify_fails` INTEGER DEFAULT 0
+* `join_at` INTEGER (ms)
+* `deadline_at` INTEGER (ms)
+* `status` TEXT (`pending`, `verified`, `jailed`, `kicked`, `banned`)
+* `last_action_at` INTEGER (ms)
+
+Optional (recommended): `moderation_log`
+
+* records every decision + error for auditability.
+
+## Permissions / intents you must configure
+
+**Gateway intents**
+
+* `Guilds`
+* `GuildMembers` (required for join + role update checks)
+
+**Discord permissions for the bot role**
+
+* Kick Members
+* Ban Members
+* Read/Send in admin-log channel
+
+**Hierarchy**
+
+* Bot’s highest role must be above users it will kick/ban (and above relevant roles).
+
+## Edge cases to explicitly handle
+
+* User verifies before deadline → cancel/mark verified + reset fails.
+* User is jailed (Penitent) → skip actions (but you may still keep record).
+* User leaves before deadline → mark record closed (no action).
+* Bot restarts → pending records still get processed by the polling loop.
+* Rate limits / transient API errors → log and retry next poll cycle.
+* Role update events: compare old/new member roles to detect Minion role added.
+
+## Deliverables you should create in VSCode
+
+* `index.js` (or `bot.js`): connects discord.js client, sets up event handlers + polling loop.
+* `db.js`: initializes SQLite schema and provides helper methods.
+* `config.json` / `.env`: token, guild ID (optional), role IDs, admin log channel ID, timeout minutes, poll interval.
+* A clear logging helper that posts embeds/messages to `1461549322779889889` on kick/ban events and errors.
+
+## Mapping from what CC did → what your bot will do
+
+* CC `$setTimeout` → **DB deadline + poller loop** (restart safe)
+* CC `$getUserVar verifyFails` → `verification_state.verify_fails`
+* CC role checks (`$hasRole`) → `member.roles.cache.has(ROLE_ID)` (after fetch)
+* CC kick/ban → `member.kick(reason)` / `guild.members.ban(userId, { reason })`
+* CC admin-log embeds → bot posts to channel `1461549322779889889`
+
+If you want, I can turn this into a starter repo layout with a minimal discord.js v14 + sqlite implementation outline (files, functions, and the event/poller flow).

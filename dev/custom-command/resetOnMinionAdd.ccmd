@@ -1,0 +1,11 @@
+// Type: On Role Give/Take
+// Trigger: add
+// Required Permission: None
+// Folder: BAN AND KICK
+// Ignore Roles: Unset
+// Channel Used: Run in Channel
+
+$onlyIf[$roleID==1461547491794227364;]
+
+$initVar[user;verifyFails;0]
+$setUserVar[verifyFails;0;$authorID]

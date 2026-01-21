@@ -1,0 +1,128 @@
+// =========================
+// DEBUG VERSION (keep logs)
+// 2026-01-17:06:22:30
+// Version 5
+// =========================
+
+// IMPORTANT:
+// CC's $highestRole[$clientID] is unreliable in timeout context.
+// We explicitly use the CC role ID (1461803049587839072) for hierarchy checks.
+// NOTE: Smaller rolePosition number = higher role in CC.
+
+// Type: On Join/Leave
+// When: User join the server
+// Folder: BAN AND KICK
+// Channel Used: Run in Channel
+
+$initVar[user;verifyFails;0]
+
+// Cache BOTH the bot and the joining member immediately (helps timeout context)
+$cacheMember[$clientID]
+$cacheMember[$authorID]
+
+$setTimeout[10m;verify_gate;$authorID]
+
+  // Re-cache BOTH at execution time (prevents "invalid or not cached" failures)
+  $cacheMember[$clientID]
+  $cacheMember[$authorID]
+
+  $redirectErrors[1461549322779889889]
+
+  // Skip if Verified (Minion) or Jail (Penitent)
+  $onlyIf[$hasRole[$authorID;1461547491794227364]==false;]
+  $onlyIf[$hasRole[$authorID;1461547492683284550]==false;]
+
+  // =========================
+  // First failure -> Kick
+  // Second failure -> Ban
+  // =========================
+  $if[$getUserVar[verifyFails;$authorID]==0]
+
+    $setUserVar[verifyFails;1;$authorID]
+
+    $channelSendMessage[1461549322779889889;
+      {title:Verification Kick}
+      {color:#FFA500}
+      {thumbnail:$userAvatar[$authorID]}
+      {field:User:$mention[$authorID]:false}
+      {field:Reason:Not verified within time limit:false}
+      {field:Action:Kick (first failure):false}
+      {timestamp}
+    ]
+
+    $kick[$authorID;Verification not completed within the allowed time.]
+
+  $else
+
+    // -------------------------
+    // Debug snapshot (timeout context)
+    // -------------------------
+    $channelSendMessage[1461549322779889889;
+      BOT DEBUG → My roles: $userRoles[$clientID]
+      BOT DEBUG → Highest role seen (unreliable): $highestRole[$clientID] | pos $rolePosition[$highestRole[$clientID]]
+      BOT DEBUG → Using CC role for hierarchy: 1461803049587839072 | pos $rolePosition[1461803049587839072]
+      BOT DEBUG → User highest: $highestRole[$authorID] | pos $rolePosition[$highestRole[$authorID]]
+    ]
+
+    // -------------------------
+    // Preflight checks (LOG + STOP)
+    // -------------------------
+    $if[$hasPerms[$clientID;ban]==false]
+      $channelSendMessage[1461549322779889889;
+        {title:Verification Ban FAILED (perm)}
+        {color:#FF0000}
+        {thumbnail:$userAvatar[$authorID]}
+        {field:User:$mention[$authorID]:false}
+        {field:Why:Bot does not have **ban** permission (per $hasPerms):false}
+        {timestamp}
+      ]
+      $stop
+    $endIf
+
+    // Hierarchy check using CC role ID (smaller position number = higher role)
+    // PASS when CC-role position is LESS than the user's highest-role position.
+    $if[$rolePosition[1461803049587839072]<$rolePosition[$highestRole[$authorID]]]
+
+      // Set to 2 for clean state tracking (optional)
+      $setUserVar[verifyFails;2;$authorID]
+
+      // -------------------------
+      // Ban (keep this embed exactly as-is)
+      // -------------------------
+      $channelSendMessage[1461549322779889889;
+        {title:Verification Ban}
+        {color:#FF0000}
+        {thumbnail:$userAvatar[$authorID]}
+        {field:User:$mention[$authorID]:false}
+        {field:Reason:Repeated failure to verify:false}
+        {field:Action:Ban (second failure):false}
+        {timestamp}
+      ]
+
+      $ban[$authorID;Repeated failure to complete verification.]
+
+      // Confirm it applied
+      $wait[2s]
+      $if[$isBanned[$authorID]==true]
+        $channelSendMessage[1461549322779889889;✅ Ban confirmed for $mention[$authorID].]
+      $else
+        $channelSendMessage[1461549322779889889;❌ Ban executed but user is NOT banned (per $isBanned). If hierarchy/perms passed, this points to Discord/CC rate-limit or silent cancel.]
+      $endIf
+
+    $else
+      $channelSendMessage[1461549322779889889;
+        {title:Verification Ban FAILED (hierarchy)}
+        {color:#FF0000}
+        {thumbnail:$userAvatar[$authorID]}
+        {field:User:$mention[$authorID]:false}
+        {field:Why:Role hierarchy blocks ban (bot not higher than user):false}
+        {field:Bot Role (CC):1461803049587839072 (pos $rolePosition[1461803049587839072]):false}
+        {field:User Highest:$highestRole[$authorID] (pos $rolePosition[$highestRole[$authorID]]):false}
+        {timestamp}
+      ]
+      $stop
+    $endIf
+
+  $endIf
+
+$endTimeout
