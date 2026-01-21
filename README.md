@@ -7,7 +7,7 @@ Key focus:
 - risk-tiered alerts that stay out of your way
 - daily summaries to keep you oriented
 
-<img src="img/ls-bot.png" alt="Bot photo placeholder" width="600">
+<img src="img/liquidity-sentinel.png" alt="liquidity sentinel bot" width="600">
 
 ---
 
@@ -16,22 +16,22 @@ Key focus:
 ### /my-loans
 Loan/trove health, liquidation buffers, and redemption risk across supported chains with clear tiered status.
 
-<img src="img/my-loans.png" alt="/my-loans screenshot placeholder" width="720">
+<img src="img/my-loans.png" alt="/my-loans screenshot" width="720">
 
 ### /my-lp
 Uniswap v3 LP positions with range status, estimated amounts from liquidity, and fee/position context.
 
-<img src="img/my-lp.png" alt="/my-lp screenshot placeholder" width="720">
+<img src="img/my-lp.png" alt="/my-lp screenshot" width="720">
 
 ### /my-wallets
 Tracked wallets and linked positions, built for a quick coverage check.
 
-<img src="img/my-wallets.png" alt="/my-wallets screenshot placeholder" width="720">
+<img src="img/my-wallets.png" alt="/my-wallets screenshot" width="720">
 
 ### /ignore-spam-tx
 Ignore noisy or irrelevant on-chain transactions to keep alerts focused on what matters.
 
-<img src="img/ignore-spam-tx.png" alt="/ignore-spam-tx screenshot placeholder" width="720">
+<img src="img/ignore-spam-tx.png" alt="/ignore-spam-tx screenshot" width="720">
 
 ---
 
@@ -40,12 +40,12 @@ Ignore noisy or irrelevant on-chain transactions to keep alerts focused on what 
 ### Alert engine
 Stateful alerting for liquidation/redemption thresholds and position risk changes with deduped notifications and tiered severity.
 
-<img src="img/alert.png" alt="Alert engine screenshot placeholder" width="720">
+<img src="img/alert-update.png" alt="Alert engine screenshot" width="720">
 
 ### Daily heartbeat DM
 A daily summary DM with tracked positions, current status, and key liquidity/health signals.
 
-<img src="img/daily-heartbeat.png" alt="Daily heartbeat screenshot placeholder" width="720">
+<img src="img/daily-heartbeat.png" alt="Daily heartbeat screenshot" width="720">
 
 ---
 
