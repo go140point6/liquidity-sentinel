@@ -215,6 +215,40 @@ function initSchema(db) {
     FOREIGN KEY (contract_id) REFERENCES contracts(id)    ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS loan_position_snapshots (
+    user_id         INTEGER NOT NULL,
+    wallet_id       INTEGER NOT NULL,
+    contract_id     INTEGER NOT NULL,
+    token_id        TEXT NOT NULL,
+    chain_id        TEXT NOT NULL,
+    protocol        TEXT NOT NULL,
+    wallet_label    TEXT,
+    snapshot_run_id TEXT NOT NULL,
+    snapshot_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    snapshot_json   TEXT NOT NULL,
+    PRIMARY KEY (user_id, wallet_id, contract_id, token_id),
+    FOREIGN KEY (user_id)     REFERENCES users(id)         ON DELETE CASCADE,
+    FOREIGN KEY (wallet_id)   REFERENCES user_wallets(id)  ON DELETE CASCADE,
+    FOREIGN KEY (contract_id) REFERENCES contracts(id)     ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS lp_position_snapshots (
+    user_id         INTEGER NOT NULL,
+    wallet_id       INTEGER NOT NULL,
+    contract_id     INTEGER NOT NULL,
+    token_id        TEXT NOT NULL,
+    chain_id        TEXT NOT NULL,
+    protocol        TEXT NOT NULL,
+    wallet_label    TEXT,
+    snapshot_run_id TEXT NOT NULL,
+    snapshot_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    snapshot_json   TEXT NOT NULL,
+    PRIMARY KEY (user_id, wallet_id, contract_id, token_id),
+    FOREIGN KEY (user_id)     REFERENCES users(id)         ON DELETE CASCADE,
+    FOREIGN KEY (wallet_id)   REFERENCES user_wallets(id)  ON DELETE CASCADE,
+    FOREIGN KEY (contract_id) REFERENCES contracts(id)     ON DELETE CASCADE
+  );
+
   CREATE INDEX IF NOT EXISTS idx_contracts_chain_kind ON contracts(chain_id, kind);
   CREATE INDEX IF NOT EXISTS idx_contracts_protocol   ON contracts(protocol);
   CREATE INDEX IF NOT EXISTS idx_contract_scan_last_block ON contract_scan_cursors(last_scanned_block);
@@ -239,6 +273,8 @@ function initSchema(db) {
   CREATE UNIQUE INDEX IF NOT EXISTS uq_alert_state_identity  ON alert_state(user_id, wallet_id, contract_id, token_id, alert_type);
   CREATE INDEX IF NOT EXISTS idx_alert_log_user_created      ON alert_log(user_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_alert_log_position          ON alert_log(wallet_id, contract_id, token_id);
+  CREATE INDEX IF NOT EXISTS idx_loan_snapshots_user         ON loan_position_snapshots(user_id);
+  CREATE INDEX IF NOT EXISTS idx_lp_snapshots_user           ON lp_position_snapshots(user_id);
 
   CREATE TRIGGER IF NOT EXISTS trg_contracts_updated_at
   AFTER UPDATE ON contracts

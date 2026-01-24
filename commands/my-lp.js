@@ -7,6 +7,19 @@ const { ensureDmOnboarding } = require("../utils/discord/dm");
 const { ephemeralFlags } = require("../utils/discord/ephemerals");
 const logger = require("../utils/logger");
 
+function requireNumberEnv(name) {
+  const raw = process.env[name];
+  if (!raw || String(raw).trim() === "") {
+    throw new Error(`Missing env var ${name}`);
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n)) throw new Error(`Env var ${name} must be numeric (got "${raw}")`);
+  return n;
+}
+
+const SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SNAPSHOT_STALE_WARN_MIN");
+const SNAPSHOT_STALE_WARN_MS = Math.max(0, Math.floor(SNAPSHOT_STALE_WARN_MIN * 60 * 1000));
+
 function chunk(arr, size) {
   const out = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
@@ -14,7 +27,8 @@ function chunk(arr, size) {
 }
 
 const { createDecimalFormatter } = require("../utils/intlNumberFormats");
-const { formatBandRuler } = require("../monitoring/lpMonitor");
+const { formatBandRuler, classifyLpRangeTier } = require("../monitoring/lpMonitor");
+const { applyLpTickShift, getTestOffsets } = require("../monitoring/testOffsets");
 const { formatLpPositionLink } = require("../utils/links");
 const { shortenTroveId } = require("../utils/ethers/shortenTroveId");
 
@@ -59,13 +73,40 @@ module.exports = {
       const { getLpSummaries } = require("../monitoring/lpMonitor");
 
       const summaries = await getLpSummaries(userId);
+      const { lpRangeShiftPct } = getTestOffsets();
+      const hasLpShift = Number.isFinite(lpRangeShiftPct) && lpRangeShiftPct !== 0;
 
       if (!summaries.length) {
         await interaction.editReply("No LP positions are currently being monitored for you.");
         return;
       }
 
-      summaries.sort((a, b) => {
+      const displaySummaries = summaries.map((s) => {
+        const out = { ...s };
+        if (
+          hasLpShift &&
+          Number.isFinite(s.currentTick) &&
+          Number.isFinite(s.tickLower) &&
+          Number.isFinite(s.tickUpper) &&
+          s.status !== "INACTIVE"
+        ) {
+          const shiftedTick = applyLpTickShift(s.currentTick, s.tickLower, s.tickUpper);
+          const rangeStatus =
+            Number.isFinite(shiftedTick) && shiftedTick >= s.tickLower && shiftedTick < s.tickUpper
+              ? "IN_RANGE"
+              : "OUT_OF_RANGE";
+          const lpClass = classifyLpRangeTier(rangeStatus, s.tickLower, s.tickUpper, shiftedTick);
+          out.currentTick = shiftedTick;
+          out.rangeStatus = rangeStatus;
+          out.lpRangeTier = lpClass.tier;
+          out.lpRangeLabel = lpClass.label;
+          out.lpPositionFrac = lpClass.positionFrac;
+          out.lpDistanceFrac = lpClass.distanceFrac;
+        }
+        return out;
+      });
+
+      displaySummaries.sort((a, b) => {
         const rangeOrder = { OUT_OF_RANGE: 0, UNKNOWN: 1, IN_RANGE: 2 };
         const tierOrder = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, UNKNOWN: 4 };
 
@@ -86,6 +127,24 @@ module.exports = {
         "_Amounts are estimated from liquidity + pool price; fees are current uncollected amounts when available._",
       ];
 
+      const snapshotTimes = displaySummaries
+        .map((s) => (s.snapshotAt ? String(s.snapshotAt) : null))
+        .filter(Boolean)
+        .map((raw) => {
+          const iso = raw.includes("T") ? raw : raw.replace(" ", "T");
+          const ts = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
+          return Number.isFinite(ts) ? Math.floor(ts / 1000) : null;
+        })
+        .filter((v) => v != null);
+      if (snapshotTimes.length) {
+        const latest = Math.max(...snapshotTimes);
+        const ageMs = Date.now() - latest * 1000;
+        const stale = ageMs > SNAPSHOT_STALE_WARN_MS;
+        const warn = stale ? " ⚠️ Data may be stale." : "";
+        descLines.push("");
+        descLines.push(`Data captured: <t:${latest}:f>${warn}`);
+      }
+
       const tierColorEmoji = {
         LOW: "🟩",
         MEDIUM: "🟨",
@@ -94,7 +153,7 @@ module.exports = {
         UNKNOWN: "⬜",
       };
 
-      const fields = summaries.map((s) => {
+      const fields = displaySummaries.map((s) => {
         const tokenLabel = shortenTroveId(s.tokenId);
         const tokenLink = formatLpPositionLink(s.protocol, s.tokenId, tokenLabel);
         const header = `${s.protocol || "UNKNOWN_PROTOCOL"} (${s.chainId || "?"})`;
@@ -141,6 +200,7 @@ module.exports = {
           const emoji = tierColorEmoji[s.lpRangeTier] || "⬜";
           valueLines.push("```" + `${emoji} Range tier: ${s.lpRangeTier}${labelText}` + "```");
         }
+
 
         let value = valueLines.join("\n");
         if (value.length > 1024) value = value.slice(0, 1020) + "…";

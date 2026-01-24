@@ -9,6 +9,19 @@ const { shortenTroveId } = require("../utils/ethers/shortenTroveId");
 const { formatLoanTroveLink } = require("../utils/links");
 const { formatLpPositionLink } = require("../utils/links");
 
+function requireNumberEnv(name) {
+  const raw = process.env[name];
+  if (!raw || String(raw).trim() === "") {
+    throw new Error(`Missing env var ${name}`);
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n)) throw new Error(`Env var ${name} must be numeric (got "${raw}")`);
+  return n;
+}
+
+const SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SNAPSHOT_STALE_WARN_MIN");
+const SNAPSHOT_STALE_WARN_MS = Math.max(0, Math.floor(SNAPSHOT_STALE_WARN_MIN * 60 * 1000));
+
 // -----------------------------
 // Formatting helpers
 // -----------------------------
@@ -18,8 +31,10 @@ function chunk(arr, size) {
   return out;
 }
 
+const fmt2 = createDecimalFormatter(0, 2); // commas + up to 2 decimals
 const fmt4 = createDecimalFormatter(0, 4); // commas + up to 4 decimals
 const fmt5 = createDecimalFormatter(0, 5); // commas + up to 5 decimals
+const fmt6 = createDecimalFormatter(0, 6); // commas + up to 6 decimals
 
 function fmtNum4(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return "n/a";
@@ -31,6 +46,11 @@ function fmtNum5(n) {
   return fmt5.format(n);
 }
 
+function fmtNum2(n) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return "n/a";
+  return fmt2.format(n);
+}
+
 function fmtPct2(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return "n/a";
   return `${n.toFixed(2)}%`;
@@ -40,10 +60,40 @@ function formatTokenAmount(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return "n/a";
   const abs = Math.abs(n);
   if (abs === 0) return "0";
-  if (abs >= 1000) return n.toFixed(2);
-  if (abs >= 1) return n.toFixed(4);
-  if (abs >= 0.01) return n.toFixed(6);
+  if (abs >= 1000) return fmt2.format(n);
+  if (abs >= 1) return fmt4.format(n);
+  if (abs >= 0.01) return fmt6.format(n);
   return n.toPrecision(6);
+}
+
+function parseSnapshotTs(raw) {
+  if (!raw) return null;
+  const iso = String(raw).includes("T") ? String(raw) : String(raw).replace(" ", "T");
+  const ts = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
+  if (!Number.isFinite(ts)) return null;
+  return Math.floor(ts / 1000);
+}
+
+function formatSnapshotLine(snapshotAt) {
+  const ts = parseSnapshotTs(snapshotAt);
+  if (!ts) return null;
+  const stale = Date.now() - ts * 1000 > SNAPSHOT_STALE_WARN_MS;
+  const warn = stale ? " ⚠️ Data may be stale." : "";
+  return `Data captured: <t:${ts}:f>${warn}`;
+}
+
+function loanMeaning(tier, kind, aheadPctText) {
+  const t = (tier || "UNKNOWN").toString().toUpperCase();
+  const label = kind === "LIQUIDATION" ? "liquidation" : "redemption";
+  const aheadSuffix =
+    kind === "REDEMPTION" && aheadPctText
+      ? ` with ${aheadPctText} of total loan debt in front of it.`
+      : ".";
+  if (t === "LOW") return `Your loan is comfortably safe from ${label}${aheadSuffix}`;
+  if (t === "MEDIUM") return `Your loan is safe, but at slight risk of ${label}${aheadSuffix}`;
+  if (t === "HIGH") return `Your loan is at elevated risk of ${label}${aheadSuffix}`;
+  if (t === "CRITICAL") return `Your loan is at severe risk of ${label}${aheadSuffix}`;
+  return `${label[0].toUpperCase()}${label.slice(1)} risk is unknown.`;
 }
 
 function formatLoanField(s) {
@@ -65,6 +115,10 @@ function formatLoanField(s) {
 
   const status = s.status || "UNKNOWN";
   lines.push(`Status: ${status}`);
+  const debtText =
+    typeof s.debtAmount === "number" && Number.isFinite(s.debtAmount) ? fmtNum4(s.debtAmount) : "n/a";
+  lines.push(`Debt: ${debtText}`);
+  lines.push("");
 
   if (s.hasPrice && typeof s.price === "number" && typeof s.liquidationPrice === "number") {
     const ltvText = fmtPct2(s.ltvPct);
@@ -72,36 +126,46 @@ function formatLoanField(s) {
       typeof s.liquidationBufferFrac === "number"
         ? `${(s.liquidationBufferFrac * 100).toFixed(2)}%`
         : "n/a";
-    lines.push("Risk:");
-    const debtText =
-      typeof s.debtAmount === "number" && Number.isFinite(s.debtAmount)
-        ? fmtNum4(s.debtAmount)
-        : "n/a";
+    lines.push("Liquidation risk:");
     lines.push(
       `LTV: ${ltvText} | Price: ${fmtNum5(s.price)} | Liq: ${fmtNum5(
         s.liquidationPrice
-      )} | Buffer: ${bufferText} (${tier}) | Debt: ${debtText}`
+      )} | Buffer: ${bufferText} (${tier})`
     );
+    lines.push(`Meaning: ${loanMeaning(s.liquidationTier, "LIQUIDATION")}`);
+    lines.push("");
   } else {
-    lines.push("Risk:");
+    lines.push("Liquidation risk:");
     lines.push("Price / liq: *(unavailable)*");
+    lines.push(`Meaning: ${loanMeaning(s.liquidationTier, "LIQUIDATION")}`);
+    lines.push("");
   }
 
   if (typeof s.interestPct === "number") {
-    let irLine = `IR: ${s.interestPct.toFixed(2)}% p.a.`;
-    if (typeof s.globalIrPct === "number") {
-      irLine += ` | Global: ${s.globalIrPct.toFixed(2)}%`;
-    }
-      if (s.redemptionTier) {
-        irLine += ` | Redemption: ${s.redemptionTier}`;
-      }
-    lines.push("Rates:");
-    lines.push(irLine);
-
-    if (typeof s.redemptionDiffPct === "number" && Number.isFinite(s.redemptionDiffPct)) {
-      const delta = s.redemptionDiffPct;
-      lines.push(`(Δ ${delta >= 0 ? "+" : ""}${delta.toFixed(2)} pp vs global)`);
-    }
+    const deltaIr =
+      typeof s.globalIrPct === "number" && Number.isFinite(s.globalIrPct)
+        ? s.interestPct - s.globalIrPct
+        : null;
+    const deltaText =
+      deltaIr == null || !Number.isFinite(deltaIr)
+        ? "Δ n/a"
+        : `Δ ${deltaIr >= 0 ? "+" : ""}${deltaIr.toFixed(2)} pp`;
+    lines.push("Redemption risk:");
+    lines.push(
+      `IR: ${s.interestPct.toFixed(2)}% | Global: ${
+        typeof s.globalIrPct === "number" ? s.globalIrPct.toFixed(2) : "n/a"
+      }% | ${deltaText}`
+    );
+    const debtAheadText = fmtNum2(s.redemptionDebtAhead);
+    const debtTotalText = fmtNum2(s.redemptionTotalDebt);
+    const aheadPctText =
+      typeof s.redemptionDebtAheadPct === "number" && Number.isFinite(s.redemptionDebtAheadPct)
+        ? `${(s.redemptionDebtAheadPct * 100).toFixed(2)}%`
+        : "n/a";
+    lines.push(
+      `Debt ahead: ${debtAheadText} | Total: ${debtTotalText} | Ahead: ${aheadPctText} (${s.redemptionTier || "UNKNOWN"})`
+    );
+    lines.push(`Meaning: ${loanMeaning(s.redemptionTier, "REDEMPTION", aheadPctText)}`);
   }
 
   return { name: title, value: lines.join("\n") };
@@ -216,11 +280,23 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client }) {
   const loanCount = loanSummaries?.length || 0;
   const lpCount = lpSummaries?.length || 0;
 
+  const snapshotTimes = []
+    .concat(loanSummaries || [])
+    .concat(lpSummaries || [])
+    .map((s) => parseSnapshotTs(s?.snapshotAt))
+    .filter((v) => v != null);
+  const latestSnapshot = snapshotTimes.length ? Math.max(...snapshotTimes) : null;
+  const snapshotLine = latestSnapshot
+    ? formatSnapshotLine(new Date(latestSnapshot * 1000).toISOString())
+    : null;
+
+  const headerLines = [`Loans: **${loanCount}** | LPs: **${lpCount}**`];
+  if (snapshotLine) headerLines.push("", snapshotLine);
+
   const header = new EmbedBuilder()
     .setTitle("24h DeFi Heartbeat")
-    .setDescription(`As of **${nowIso}**\nLoans: **${loanCount}** | LPs: **${lpCount}**`)
-    .setColor("DarkBlue")
-    .setTimestamp();
+    .setDescription(headerLines.join("\n"))
+    .setColor("DarkBlue");
 
   if (client?.user) header.setThumbnail(client.user.displayAvatarURL());
   embeds.push(header);
@@ -233,8 +309,6 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client }) {
       return bv - av;
     })
     .map(formatLoanField);
-
-  const loanColor = colorForLoanTier(worstLoanTier(loanSummaries || []));
 
   if (!loanFields.length) {
     embeds.push(
@@ -258,10 +332,9 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client }) {
         }[tier] || "⬜";
         return fieldIds.has(`${tierEmoji} ${title}`);
       });
-      const chunkColor = colorForLoanTier(worstLoanTier(chunkLoans));
       const e = new EmbedBuilder()
         .setTitle(idx === 0 ? "Loans" : "Loans (cont.)")
-        .setColor(chunkColor)
+        .setColor("DarkBlue")
         .addFields(fields);
       embeds.push(e);
     });
@@ -277,8 +350,6 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client }) {
       return (a.protocol || "").localeCompare(b.protocol || "");
     })
     .map(formatLpField);
-
-  const lpColor = colorForLpStatus(worstLpStatus(lpSummaries || []));
 
   if (!lpFields.length) {
     embeds.push(
@@ -301,15 +372,17 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client }) {
         )}`;
         return fieldIds.has(title);
       });
-      const chunkColor = colorForLpStatus(worstLpStatus(chunkLps));
       const e = new EmbedBuilder()
         .setTitle(idx === 0 ? "LP Positions" : "LP Positions (cont.)")
-        .setColor(chunkColor)
+        .setColor("DarkBlue")
         .addFields(fields);
       embeds.push(e);
     });
   }
 
+  if (embeds.length) {
+    embeds[embeds.length - 1].setTimestamp();
+  }
   return embeds;
 }
 
