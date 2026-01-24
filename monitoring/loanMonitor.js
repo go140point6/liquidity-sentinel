@@ -17,6 +17,8 @@ const troveManagerAbi = require("../abi/troveManager.json");
 const priceFeedAbi = require("../abi/priceFeed.json");
 const erc20MetadataAbi = require("../abi/erc20Metadata.json");
 const uniswapV3PoolAbi = require("../abi/uniswapV3Pool.json");
+const sortedTrovesAbi = require("../abi/sortedTroves.json");
+const activePoolAbi = require("../abi/activePool.json");
 
 const { getDb } = require("../db");
 const { getProviderForChain } = require("../utils/ethers/providers");
@@ -24,10 +26,14 @@ const { handleLiquidationAlert, handleRedemptionAlert } = require("./alertEngine
 const {
   applyGlobalIrOffset,
   applyPriceMultiplier,
+  applyDebtAheadOffsetPct,
+  setDebtAheadBase,
+  setDebtAheadTierThresholds,
   logRunApplied,
   getTestOffsets,
 } = require("./testOffsets");
 const logger = require("../utils/logger");
+const { shortenTroveId } = require("../utils/ethers/shortenTroveId");
 
 // -----------------------------
 // Chains
@@ -61,6 +67,9 @@ const LIQ_BUFFER_CRIT = requireNumberEnv("LIQ_BUFFER_CRIT");
 
 const REDEMP_BELOW_CRITICAL = requireNumberEnv("REDEMP_BELOW_CRITICAL");
 const REDEMP_ABOVE_MED = requireNumberEnv("REDEMP_ABOVE_MED");
+const REDEMP_DEBT_AHEAD_LOW_PCT = requireNumberEnv("REDEMP_DEBT_AHEAD_LOW_PCT");
+const REDEMP_DEBT_AHEAD_MED_PCT = requireNumberEnv("REDEMP_DEBT_AHEAD_MED_PCT");
+const REDEMP_DEBT_AHEAD_HIGH_PCT = requireNumberEnv("REDEMP_DEBT_AHEAD_HIGH_PCT");
 
 const CDP_REDEMPTION_TRIGGER = requireNumberEnv("CDP_REDEMPTION_TRIGGER");
 
@@ -79,6 +88,12 @@ const GLOBAL_IR_BRANCHES = requireEnv("GLOBAL_IR_BRANCHES")
 
 const LIQ_TIER_ORDER = ["LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"];
 const REDEMP_TIER_ORDER = ["LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"];
+
+setDebtAheadTierThresholds(
+  REDEMP_DEBT_AHEAD_LOW_PCT,
+  REDEMP_DEBT_AHEAD_MED_PCT,
+  REDEMP_DEBT_AHEAD_HIGH_PCT
+);
 
 
 // -----------------------------
@@ -239,7 +254,7 @@ function getGlobalInterestRatePctFromMap(protocol, globalIrMap) {
   if (!branchKey) return null;
   const v = globalIrMap[branchKey];
   const out = typeof v === "number" && Number.isFinite(v) ? v : null;
-  return applyGlobalIrOffset(out);
+  return applyGlobalIrOffset(out, protocol);
 }
 
 // -----------------------------
@@ -259,12 +274,95 @@ function classifyRedemptionTier(interestPct, globalPct) {
   return { tier, diffPct: diff };
 }
 
+function classifyRedemptionTierByDebtAhead(debtAheadPct) {
+  if (debtAheadPct == null || !Number.isFinite(debtAheadPct)) {
+    return { tier: "UNKNOWN", debtAheadPct: null };
+  }
+  if (debtAheadPct >= REDEMP_DEBT_AHEAD_LOW_PCT) {
+    return { tier: "LOW", debtAheadPct };
+  }
+  if (debtAheadPct >= REDEMP_DEBT_AHEAD_MED_PCT) {
+    return { tier: "MEDIUM", debtAheadPct };
+  }
+  if (debtAheadPct >= REDEMP_DEBT_AHEAD_HIGH_PCT) {
+    return { tier: "HIGH", debtAheadPct };
+  }
+  return { tier: "CRITICAL", debtAheadPct };
+}
+
 function classifyLiquidationRisk(bufferFrac) {
   if (bufferFrac == null || !Number.isFinite(bufferFrac)) return { tier: "UNKNOWN" };
   if (bufferFrac <= LIQ_BUFFER_CRIT) return { tier: "CRITICAL" };
   if (bufferFrac <= LIQ_BUFFER_HIGH) return { tier: "HIGH" };
   if (bufferFrac <= LIQ_BUFFER_WARN) return { tier: "MEDIUM" };
   return { tier: "LOW" };
+}
+
+async function getActivePoolStats(provider, troveManagerAddr) {
+  const tm = new ethers.Contract(troveManagerAddr, troveManagerAbi, provider);
+  const activePoolAddr = await tm.activePool();
+  if (!activePoolAddr || activePoolAddr === ethers.ZeroAddress) return null;
+  const ap = new ethers.Contract(activePoolAddr, activePoolAbi, provider);
+  const [sum, debt] = await Promise.all([ap.aggWeightedDebtSum(), ap.aggRecordedDebt()]);
+  const sumNum = Number(ethers.formatUnits(sum, 18));
+  const debtNum = Number(ethers.formatUnits(debt, 18));
+  if (!Number.isFinite(sumNum) || !Number.isFinite(debtNum) || debtNum <= 0) return null;
+  return { avgIrPct: (sumNum / debtNum) * 100.0, totalDebt: debtNum };
+}
+
+async function computeDebtInFront(provider, troveManagerAddr, troveId) {
+  const tm = new ethers.Contract(troveManagerAddr, troveManagerAbi, provider);
+  const sortedAddr = await tm.sortedTroves();
+  if (!sortedAddr || sortedAddr === ethers.ZeroAddress) return null;
+
+  const sorted = new ethers.Contract(sortedAddr, sortedTrovesAbi, provider);
+  const target = BigInt(troveId).toString();
+
+  const first = await sorted.getFirst();
+  const last = await sorted.getLast();
+  const firstId = first != null ? BigInt(first).toString() : "0";
+  const lastId = last != null ? BigInt(last).toString() : "0";
+
+  const fetchIrPct = async (id) => {
+    if (!id || id === "0") return null;
+    try {
+      const latest = await tm.getLatestTroveData(id);
+      return Number(ethers.formatUnits(latest.annualInterestRate, 18)) * 100.0;
+    } catch (_) {
+      return null;
+    }
+  };
+  const [firstIr, lastIr] = await Promise.all([fetchIrPct(firstId), fetchIrPct(lastId)]);
+
+  let current = await sorted.getLast();
+  let currentId = current != null ? BigInt(current).toString() : "0";
+  let totalDebt = 0;
+  let count = 0;
+  const maxSteps = 50000;
+
+  while (currentId !== "0" && currentId !== target) {
+    const latest = await tm.getLatestTroveData(currentId);
+    const debtNorm = Number(ethers.formatUnits(latest.entireDebt, 18));
+    if (Number.isFinite(debtNorm)) totalDebt += debtNorm;
+
+    const prev = await sorted.getPrev(currentId);
+    const nextId = prev != null ? BigInt(prev).toString() : "0";
+    if (nextId === currentId) break;
+
+    currentId = nextId;
+    count += 1;
+    if (count > maxSteps) break;
+  }
+
+  return {
+    debtInFront: totalDebt,
+    trovesAhead: count,
+    found: currentId === target,
+    firstId,
+    lastId,
+    firstIr,
+    lastIr,
+  };
 }
 
 // -----------------------------
@@ -348,6 +446,35 @@ function classifyCdpRedemptionState(cdpPrice) {
   return { state, trigger, diff, label };
 }
 
+function clamp01(n) {
+  if (!Number.isFinite(n)) return n;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return n;
+}
+
+function getDebtAheadSnapshot({ userId, walletId, contractId, troveId }) {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `
+      SELECT snapshot_json, snapshot_at
+      FROM loan_position_snapshots
+      WHERE user_id = ?
+        AND wallet_id = ?
+        AND contract_id = ?
+        AND token_id = ?
+      `
+    )
+    .get(userId, walletId, contractId, String(troveId));
+  if (!row?.snapshot_json) return null;
+  try {
+    return { ...JSON.parse(row.snapshot_json), snapshotAt: row.snapshot_at };
+  } catch (_) {
+    return null;
+  }
+}
+
 // -----------------------------
 // DB rows (v2 schema)
 // -----------------------------
@@ -391,6 +518,53 @@ function getMonitoredLoanRows(userId = null) {
   `
     )
     .all(userId, userId);
+}
+
+let _loanSnapshotStmt = null;
+function upsertLoanSnapshot(snapshot, runId) {
+  if (!runId || !snapshot) return;
+  const db = getDb();
+  if (!_loanSnapshotStmt) {
+    _loanSnapshotStmt = db.prepare(`
+      INSERT INTO loan_position_snapshots (
+        user_id, wallet_id, contract_id, token_id,
+        chain_id, protocol, wallet_label,
+        snapshot_run_id, snapshot_at, snapshot_json
+      )
+      VALUES (
+        @user_id, @wallet_id, @contract_id, @token_id,
+        @chain_id, @protocol, @wallet_label,
+        @snapshot_run_id, datetime('now'), @snapshot_json
+      )
+      ON CONFLICT(user_id, wallet_id, contract_id, token_id) DO UPDATE SET
+        chain_id = excluded.chain_id,
+        protocol = excluded.protocol,
+        wallet_label = excluded.wallet_label,
+        snapshot_run_id = excluded.snapshot_run_id,
+        snapshot_at = datetime('now'),
+        snapshot_json = excluded.snapshot_json
+    `);
+  }
+
+  _loanSnapshotStmt.run({
+    user_id: snapshot.userId,
+    wallet_id: snapshot.walletId,
+    contract_id: snapshot.contractId,
+    token_id: snapshot.troveId,
+    chain_id: snapshot.chainId,
+    protocol: snapshot.protocol,
+    wallet_label: snapshot.walletLabel || null,
+    snapshot_run_id: runId,
+    snapshot_json: JSON.stringify(snapshot),
+  });
+}
+
+function cleanupLoanSnapshots(runId) {
+  if (!runId) return;
+  const db = getDb();
+  db.prepare(
+    `DELETE FROM loan_position_snapshots WHERE snapshot_run_id != ?`
+  ).run(runId);
 }
 
 // -----------------------------
@@ -475,7 +649,7 @@ async function summarizeLoanPosition(provider, chainId, protocol, row, globalIrM
   if (!rawPrice) return base;
 
   const priceNormRaw = Number(ethers.formatUnits(rawPrice, 18));
-  const priceNorm = applyPriceMultiplier(priceNormRaw);
+  const priceNorm = applyPriceMultiplier(priceNormRaw, protocol);
   const mcrNorm = Number(ethers.formatUnits(await troveManager.MCR(), 18));
 
   const collValue = collNorm * priceNorm;
@@ -509,7 +683,13 @@ async function summarizeLoanPosition(provider, chainId, protocol, row, globalIrM
 // -----------------------------
 // Core loan description -> alerts (v2 ids)
 // -----------------------------
-async function describeLoanPosition(provider, chainId, protocol, row, { cdpState, globalIrMap }) {
+async function describeLoanPosition(
+  provider,
+  chainId,
+  protocol,
+  row,
+  { cdpState, globalIrMap }
+) {
   const { userId, walletId, contractId, contract, owner, troveId, walletLabel } = row;
 
   const troveNFT = new ethers.Contract(contract, troveNftAbi, provider);
@@ -522,8 +702,9 @@ async function describeLoanPosition(provider, chainId, protocol, row, { cdpState
   const troveManager = new ethers.Contract(troveManagerAddr, troveManagerAbi, provider);
   const collToken = new ethers.Contract(collTokenAddr, erc20MetadataAbi, provider);
 
-  const [collDecimals, latest, statusCode] = await Promise.all([
+  const [collDecimals, collSymbol, latest, statusCode] = await Promise.all([
     collToken.decimals(),
+    collToken.symbol().catch(() => ""),
     troveManager.getLatestTroveData(troveId),
     troveManager.getTroveStatus(troveId),
   ]);
@@ -539,11 +720,11 @@ async function describeLoanPosition(provider, chainId, protocol, row, { cdpState
 
   const priceFeedAddr = await troveManager.priceFeed();
   const priceFeed = new ethers.Contract(priceFeedAddr, priceFeedAbi, provider);
-  const { rawPrice } = await getOraclePrice(priceFeed);
+  const { rawPrice, source } = await getOraclePrice(priceFeed);
   if (!rawPrice) return;
 
   const priceNormRaw = Number(ethers.formatUnits(rawPrice, 18));
-  const priceNorm = applyPriceMultiplier(priceNormRaw);
+  const priceNorm = applyPriceMultiplier(priceNormRaw, protocol);
   const mcrNorm = Number(ethers.formatUnits(await troveManager.MCR(), 18));
 
   const collValue = collNorm * priceNorm;
@@ -555,6 +736,9 @@ async function describeLoanPosition(provider, chainId, protocol, row, { cdpState
     priceNorm > 0 && liquidationPrice != null ? (priceNorm - liquidationPrice) / priceNorm : null;
 
   const liqClass = classifyLiquidationRisk(bufferFrac);
+
+  const debtSnap = getDebtAheadSnapshot({ userId, walletId, contractId, troveId });
+  const snapshotAt = debtSnap?.snapshotAt || null;
 
   // Liquidation alert (DB-stable identity)
   const liqTierFinal = liqClass.tier;
@@ -579,13 +763,49 @@ async function describeLoanPosition(provider, chainId, protocol, row, { cdpState
     currentPrice: priceNorm,
     liquidationBufferFrac: bufferFrac,
     status: statusStr,
+    snapshotAt,
   });
 
-  // Redemption alert requires CDP active
+  // Redemption alert no longer gated by CDP active state
   const cdpIsActive = cdpState && cdpState.state === "ACTIVE";
 
-  const redTierFinal = redClass.tier;
-  const redIsActiveFinal = cdpIsActive && globalIrPct != null;
+  let debtAheadPct =
+    typeof debtSnap?.redemptionDebtAheadPct === "number" &&
+    Number.isFinite(debtSnap.redemptionDebtAheadPct)
+      ? debtSnap.redemptionDebtAheadPct
+      : null;
+  const debtTotal =
+    typeof debtSnap?.redemptionTotalDebt === "number" && Number.isFinite(debtSnap.redemptionTotalDebt)
+      ? debtSnap.redemptionTotalDebt
+      : null;
+  const debtOffsetPp = getTestOffsets().debtAheadOffsetPp || 0;
+  const debtOffsetByProtocol = getTestOffsets().debtAheadOffsetByProtocol || {};
+  const protocolOffsetPp =
+    typeof debtOffsetByProtocol?.[String(protocol || "").toUpperCase()] === "number"
+      ? debtOffsetByProtocol[String(protocol || "").toUpperCase()]
+      : 0;
+  const totalOffsetPp = debtOffsetPp + protocolOffsetPp;
+  if (debtAheadPct != null && Number.isFinite(totalOffsetPp) && totalOffsetPp !== 0) {
+    debtAheadPct = clamp01(debtAheadPct + totalOffsetPp / 100);
+  }
+  const redDebtClass = classifyRedemptionTierByDebtAhead(debtAheadPct);
+  const redTierFinal = redDebtClass.tier;
+  const redIsActiveFinal = debtAheadPct != null;
+
+  const debtAhead =
+    debtAheadPct != null && debtTotal != null
+      ? debtAheadPct * debtTotal
+      : typeof debtSnap?.redemptionDebtAhead === "number" && Number.isFinite(debtSnap.redemptionDebtAhead)
+        ? debtSnap.redemptionDebtAhead
+        : null;
+  const loanIR =
+    typeof debtSnap?.interestPct === "number" && Number.isFinite(debtSnap.interestPct)
+      ? debtSnap.interestPct
+      : null;
+  const globalIR =
+    typeof debtSnap?.globalIrPct === "number" && Number.isFinite(debtSnap.globalIrPct)
+      ? debtSnap.globalIrPct
+      : null;
 
   await handleRedemptionAlert({
     userId,
@@ -601,11 +821,16 @@ async function describeLoanPosition(provider, chainId, protocol, row, { cdpState
 
     isActive: redIsActiveFinal,
     tier: redTierFinal,
-    cdpIR: interestPct,
-    globalIR: globalIrPct,
+    debtAheadPct,
+    debtAhead,
+    debtTotal,
+    loanIR,
+    globalIR,
+    snapshotAt,
     isCDPActive: cdpIsActive,
     status: statusStr,
   });
+
 }
 
 // -----------------------------
@@ -680,54 +905,153 @@ async function monitorLoans() {
 // Public API: getLoanSummaries (needed by /my-loans)
 // -----------------------------
 async function getLoanSummaries(userId = null) {
-  const summaries = [];
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `
+      SELECT snapshot_json, snapshot_at
+      FROM loan_position_snapshots
+      WHERE (? IS NULL OR user_id = ?)
+      ORDER BY chain_id, protocol, token_id
+    `
+    )
+    .all(userId, userId);
 
-  // userId limits the work to one user's positions (full scan when null)
+  const out = [];
+  for (const r of rows) {
+    try {
+      const obj = JSON.parse(r.snapshot_json);
+      if (obj && typeof obj === "object") {
+        obj.snapshotAt = r.snapshot_at;
+        out.push(obj);
+      }
+    } catch (_) {}
+  }
+
+  return out;
+}
+
+async function refreshLoanSnapshots() {
+  const runId = String(Date.now());
+  const rows = getMonitoredLoanRows();
+  if (!rows.length) return;
+
   let globalIrMap = null;
   try {
     globalIrMap = await fetchGlobalIrPctMap();
   } catch (e) {
-    logger.warn(`[loanMonitor] Global IR unavailable for summaries: ${e?.message || e}`);
+    logger.warn(`[loanMonitor] Global IR unavailable for snapshots: ${e?.message || e}`);
   }
 
-  const rows = getMonitoredLoanRows(userId);
-  if (!rows.length) return summaries;
+  const providers = {};
+  const getP = (chainId) => (providers[chainId] ||= getProviderForChain(chainId, CHAINS_CONFIG));
+  const poolStatsByContract = new Map();
+  const troveManagerByNft = new Map();
 
-  const byChain = new Map();
-  for (const r of rows) {
-    const cid = String(r.chainId || "").toUpperCase();
-    if (!byChain.has(cid)) byChain.set(cid, []);
-    byChain.get(cid).push(r);
-  }
-
-  for (const [chainId, chainRows] of byChain.entries()) {
+  for (const row of rows) {
+    const chainId = String(row.chainId || "").toUpperCase();
     let provider;
     try {
-      provider = getProviderForChain(chainId, CHAINS_CONFIG);
+      provider = getP(chainId);
     } catch (e) {
-      logger.warn(`[loanMonitor] Skipping chain ${chainId} in getLoanSummaries: ${e?.message || e}`);
+      logger.warn(`[loanMonitor] Skipping chain ${chainId} for snapshots: ${e?.message || e}`);
       continue;
     }
 
-    for (const row of chainRows) {
-      const protocol = row.protocol || "UNKNOWN_PROTOCOL";
-      try {
-        const s = await summarizeLoanPosition(provider, chainId, protocol, row, globalIrMap);
-        if (s) summaries.push(s);
-      } catch (e) {
-        logger.error(
-          `[loanMonitor] Failed summary troveId=${row.troveId} chain=${chainId} protocol=${protocol}: ${e?.message || e}`
+    const protocol = row.protocol || "UNKNOWN_PROTOCOL";
+    try {
+      const s = await summarizeLoanPosition(provider, chainId, protocol, row, globalIrMap);
+      const nftAddr = row.contract;
+      if (nftAddr) {
+        if (!troveManagerByNft.has(nftAddr)) {
+          try {
+            const nft = new ethers.Contract(nftAddr, troveNftAbi, provider);
+            const tmAddr = await nft.troveManager();
+            troveManagerByNft.set(nftAddr, tmAddr);
+          } catch (e) {
+            troveManagerByNft.set(nftAddr, null);
+          }
+        }
+        const troveManagerAddr = troveManagerByNft.get(nftAddr);
+        if (!troveManagerAddr) return;
+
+        if (!poolStatsByContract.has(troveManagerAddr)) {
+          try {
+            const stats = await getActivePoolStats(provider, troveManagerAddr);
+            poolStatsByContract.set(troveManagerAddr, stats);
+          } catch (e) {
+            poolStatsByContract.set(troveManagerAddr, null);
+          }
+        }
+        const stats = poolStatsByContract.get(troveManagerAddr);
+        const avgIr = stats?.avgIrPct ?? null;
+        const totalDebt = stats?.totalDebt ?? null;
+
+        const debtInfo = await computeDebtInFront(provider, troveManagerAddr, row.troveId);
+        const debtAheadPct =
+          typeof debtInfo?.debtInFront === "number" &&
+          Number.isFinite(debtInfo.debtInFront) &&
+          typeof totalDebt === "number" &&
+          Number.isFinite(totalDebt) &&
+          totalDebt > 0
+            ? debtInfo.debtInFront / totalDebt
+            : null;
+        if (s) {
+          setDebtAheadBase(protocol, debtAheadPct, totalDebt);
+          const adjustedDebtAheadPct = applyDebtAheadOffsetPct(debtAheadPct, protocol);
+          const adjustedDebtAhead =
+            adjustedDebtAheadPct != null &&
+            typeof totalDebt === "number" &&
+            Number.isFinite(totalDebt) &&
+            totalDebt > 0
+              ? adjustedDebtAheadPct * totalDebt
+              : debtInfo?.debtInFront ?? null;
+          const redDebt = classifyRedemptionTierByDebtAhead(adjustedDebtAheadPct);
+          s.redemptionTier = redDebt.tier;
+          s.redemptionDebtAhead = adjustedDebtAhead;
+          s.redemptionDebtAheadPct = adjustedDebtAheadPct;
+          s.redemptionTotalDebt = totalDebt;
+          upsertLoanSnapshot(s, runId);
+        }
+        const fmtNum = new Intl.NumberFormat("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        });
+        let avgIrPct = avgIr;
+        if (typeof avgIrPct === "number" && Number.isFinite(avgIrPct) && avgIrPct > 1e6) {
+          avgIrPct = avgIrPct / 1e18;
+        }
+        const avgIrText =
+          typeof avgIrPct === "number" && Number.isFinite(avgIrPct)
+            ? `${avgIrPct.toFixed(2)}%`
+            : "n/a";
+        const debtText =
+          typeof debtInfo?.debtInFront === "number" && Number.isFinite(debtInfo.debtInFront)
+            ? fmtNum.format(debtInfo.debtInFront)
+            : "n/a";
+        logger.info(
+          `[loanMonitor] Redemption depth ${protocol} trove=${shortenTroveId(row.troveId)} ` +
+            `ahead=${debtInfo?.trovesAhead ?? "?"} debt=${debtText} ` +
+            `avgIR=${avgIrText} first=${shortenTroveId(debtInfo?.firstId)} ` +
+            `(${debtInfo?.firstIr != null ? debtInfo.firstIr.toFixed(2) : "n/a"}%) ` +
+            `last=${shortenTroveId(debtInfo?.lastId)} ` +
+            `(${debtInfo?.lastIr != null ? debtInfo.lastIr.toFixed(2) : "n/a"}%)`
         );
       }
+    } catch (e) {
+      logger.error(
+        `[loanMonitor] Failed snapshot troveId=${row.troveId} chain=${chainId} protocol=${protocol}: ${e?.message || e}`
+      );
     }
   }
 
-  return summaries;
+  cleanupLoanSnapshots(runId);
 }
 
 module.exports = {
   monitorLoans,
   getLoanSummaries,
+  refreshLoanSnapshots,
   getCdpPrice,
   classifyCdpRedemptionState,
 };

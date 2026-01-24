@@ -27,6 +27,23 @@ const { handleLpRangeAlert } = require("./alertEngine");
 const { applyLpTickShift, logRunApplied } = require("./testOffsets");
 const logger = require("../utils/logger");
 
+function getLpSnapshotAt({ userId, walletId, contractId, tokenId }) {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `
+      SELECT snapshot_at
+      FROM lp_position_snapshots
+      WHERE user_id = ?
+        AND wallet_id = ?
+        AND contract_id = ?
+        AND token_id = ?
+      `
+    )
+    .get(userId, walletId, contractId, String(tokenId));
+  return row?.snapshot_at || null;
+}
+
 // -----------------------------
 // Chains config for getProviderForChain()
 // -----------------------------
@@ -276,10 +293,10 @@ function classifyLpRangeTier(rangeStatus, tickLower, tickUpper, currentTick) {
 
     const label =
       tier === "LOW"
-        ? "comfortably in range"
+        ? "comfortably in range."
         : tier === "MEDIUM"
-        ? "in range but near edge"
-        : "in range and very close to edge";
+        ? "in range but starting to drift."
+        : "in range but close to the edge.";
 
     return { tier, positionFrac, distanceFrac: centerDist, label };
   }
@@ -301,10 +318,10 @@ function classifyLpRangeTier(rangeStatus, tickLower, tickUpper, currentTick) {
 
     const label =
       tier === "MEDIUM"
-        ? "slightly out of range"
+        ? "slightly out of range."
         : tier === "HIGH"
-        ? "far out of range"
-        : "deeply out of range";
+        ? "far out of range."
+        : "deeply out of range.";
 
     return { tier, positionFrac: null, distanceFrac, label };
   }
@@ -313,7 +330,7 @@ function classifyLpRangeTier(rangeStatus, tickLower, tickUpper, currentTick) {
     tier: normStatus === "IN_RANGE" ? "LOW" : "UNKNOWN",
     positionFrac: null,
     distanceFrac: null,
-    label: normStatus === "IN_RANGE" ? "in range (no detailed geometry)" : "range not computed",
+    label: normStatus === "IN_RANGE" ? "in range (no detailed geometry)." : "range not computed.",
   };
 }
 
@@ -375,6 +392,51 @@ function getMonitoredLpRows(userId = null) {
   `;
 
   return db.prepare(sql).all(userId, userId);
+}
+
+let _lpSnapshotStmt = null;
+function upsertLpSnapshot(snapshot, runId) {
+  if (!runId || !snapshot) return;
+  const db = getDb();
+  if (!_lpSnapshotStmt) {
+    _lpSnapshotStmt = db.prepare(`
+      INSERT INTO lp_position_snapshots (
+        user_id, wallet_id, contract_id, token_id,
+        chain_id, protocol, wallet_label,
+        snapshot_run_id, snapshot_at, snapshot_json
+      )
+      VALUES (
+        @user_id, @wallet_id, @contract_id, @token_id,
+        @chain_id, @protocol, @wallet_label,
+        @snapshot_run_id, datetime('now'), @snapshot_json
+      )
+      ON CONFLICT(user_id, wallet_id, contract_id, token_id) DO UPDATE SET
+        chain_id = excluded.chain_id,
+        protocol = excluded.protocol,
+        wallet_label = excluded.wallet_label,
+        snapshot_run_id = excluded.snapshot_run_id,
+        snapshot_at = datetime('now'),
+        snapshot_json = excluded.snapshot_json
+    `);
+  }
+
+  _lpSnapshotStmt.run({
+    user_id: snapshot.userId,
+    wallet_id: snapshot.walletId,
+    contract_id: snapshot.contractId,
+    token_id: snapshot.tokenId,
+    chain_id: snapshot.chainId,
+    protocol: snapshot.protocol,
+    wallet_label: snapshot.walletLabel || null,
+    snapshot_run_id: runId,
+    snapshot_json: JSON.stringify(snapshot),
+  });
+}
+
+function cleanupLpSnapshots(runId) {
+  if (!runId) return;
+  const db = getDb();
+  db.prepare(`DELETE FROM lp_position_snapshots WHERE snapshot_run_id != ?`).run(runId);
 }
 
 function extractPrevRangeStatus(prevStateJson) {
@@ -490,14 +552,24 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
   let fee1Raw = tokensOwed1Raw;
 
   let simWorked = false;
+  let feeSource = "tokensOwed";
   try {
     const sim = await simulateCollectFees(pm, tokenIdBN, owner);
     if (sim?.fee0Raw != null && sim?.fee1Raw != null) {
       fee0Raw = sim.fee0Raw;
       fee1Raw = sim.fee1Raw;
       simWorked = true;
+      feeSource = "collectSim";
+    } else {
+      logger.debug(
+        `[LP][${chainId}] collectSim unavailable tokenId=${tokenId}: no fee data returned`
+      );
     }
-  } catch (_) {}
+  } catch (err) {
+    logger.debug(
+      `[LP][${chainId}] collectSim FAILED tokenId=${tokenId}: ${err?.shortMessage || err?.message || err}`
+    );
+  }
 
   // If sim gives 0/0 (or doesn’t work) but we have a pool + tick, compute via feeGrowth math
   try {
@@ -505,20 +577,33 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
     if ((bothZero || !simWorked) && poolAddr && Number.isFinite(currentTick)) {
       const pool = new ethers.Contract(poolAddr, uniswapV3PoolAbi, provider);
 
+      const MAX_UINT256 = (1n << 256n) - 1n;
+      const SANE_MAX = 1n << 255n;
+      const fg0Raw = toBigIntish(pos.feeGrowthInside0LastX128);
+      const fg1Raw = toBigIntish(pos.feeGrowthInside1LastX128);
+      const fg0 = fg0Raw > SANE_MAX ? 0n : fg0Raw;
+      const fg1 = fg1Raw > SANE_MAX ? 0n : fg1Raw;
+      if (fg0Raw === MAX_UINT256 || fg1Raw === MAX_UINT256 || fg0Raw > SANE_MAX || fg1Raw > SANE_MAX) {
+        logger.debug(
+          `[LP][${chainId}] feeGrowthInside out-of-range tokenId=${tokenId}; treating as 0`
+        );
+      }
+
       const computed = await computeFeesOwedFromPool({
         pool,
         currentTick,
         tickLower,
         tickUpper,
         liquidity: liquidity.toString(),
-        feeGrowthInside0LastX128: pos.feeGrowthInside0LastX128,
-        feeGrowthInside1LastX128: pos.feeGrowthInside1LastX128,
+        feeGrowthInside0LastX128: fg0,
+        feeGrowthInside1LastX128: fg1,
         tokensOwed0: pos.tokensOwed0,
         tokensOwed1: pos.tokensOwed1,
       });
 
       fee0Raw = computed.fee0Raw;
       fee1Raw = computed.fee1Raw;
+      feeSource = "feeGrowth";
     }
   } catch (err) {
     logger.warn(
@@ -531,6 +616,19 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
   let fees1 = null;
   try { fees0 = Number(ethers.formatUnits(fee0Raw, dec0)); } catch (_) {}
   try { fees1 = Number(ethers.formatUnits(fee1Raw, dec1)); } catch (_) {}
+
+  logger.debug(
+    `[LP][${chainId}] fee source=${feeSource} tokenId=${tokenId} ` +
+      `pool=${poolAddr || "n/a"} tick=${Number.isFinite(currentTick) ? currentTick : "n/a"} ` +
+      `fees0=${fees0 ?? "n/a"} fees1=${fees1 ?? "n/a"}`
+  );
+  logger.debug(
+    `[LP][${chainId}] fee debug tokenId=${tokenId} tickLower=${tickLower} tickUpper=${tickUpper} ` +
+      `liq=${liquidity?.toString?.() || liquidity || "n/a"} ` +
+      `tokensOwed0=${tokensOwed0Raw} tokensOwed1=${tokensOwed1Raw} ` +
+      `feeGrowthInside0=${pos.feeGrowthInside0LastX128?.toString?.() || pos.feeGrowthInside0LastX128} ` +
+      `feeGrowthInside1=${pos.feeGrowthInside1LastX128?.toString?.() || pos.feeGrowthInside1LastX128}`
+  );
 
   return {
     userId,
@@ -576,47 +674,72 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
 // Public API: getLpSummaries
 // -----------------------------
 async function getLpSummaries(userId = null) {
-  const summaries = [];
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `
+      SELECT snapshot_json, snapshot_at
+      FROM lp_position_snapshots
+      WHERE (? IS NULL OR user_id = ?)
+      ORDER BY chain_id, protocol, token_id
+    `
+    )
+    .all(userId, userId);
 
-  // userId limits the work to one user's positions (full scan when null)
-  const rows = getMonitoredLpRows(userId);
-  if (!rows || rows.length === 0) return summaries;
-
-  const byChain = new Map();
+  const out = [];
   for (const r of rows) {
-    const chainId = (r.chainId || "").toUpperCase();
-    if (!byChain.has(chainId)) byChain.set(chainId, []);
-    byChain.get(chainId).push(r);
+    try {
+      const obj = JSON.parse(r.snapshot_json);
+      if (obj && typeof obj === "object") {
+        obj.snapshotAt = r.snapshot_at;
+        out.push(obj);
+      }
+    } catch (_) {}
   }
 
-  for (const [chainId, chainRows] of byChain.entries()) {
+  return out;
+}
+
+async function refreshLpSnapshots() {
+  const runId = String(Date.now());
+  const rows = getMonitoredLpRows();
+  if (!rows || rows.length === 0) return;
+
+  const providers = new Map();
+  const getP = (chainId) => {
+    if (providers.has(chainId)) return providers.get(chainId);
+    const p = getProviderForChain(chainId, CHAINS_CONFIG);
+    providers.set(chainId, p);
+    return p;
+  };
+
+  for (const row of rows) {
+    const chainId = (row.chainId || "").toUpperCase();
     let provider;
     try {
-      provider = getProviderForChain(chainId, CHAINS_CONFIG);
+      provider = getP(chainId);
     } catch (err) {
-      logger.warn(`[LP] Skipping chain ${chainId} in getLpSummaries: ${err?.message || err}`);
+      logger.warn(`[LP] Skipping chain ${chainId} for snapshots: ${err?.message || err}`);
       continue;
     }
 
-    for (const row of chainRows) {
-      try {
-        const summary = await summarizeLpPosition(
-          provider,
-          chainId,
-          row.protocol || "UNKNOWN_PROTOCOL",
-          row
-        );
-        if (summary) summaries.push(summary);
-      } catch (err) {
-        logger.error(
-          `[LP] Failed to build LP summary tokenId=${row.tokenId} on ${chainId}:`,
-          err?.message || err
-        );
-      }
+    try {
+      const summary = await summarizeLpPosition(
+        provider,
+        chainId,
+        row.protocol || "UNKNOWN_PROTOCOL",
+        row
+      );
+      if (summary) upsertLpSnapshot(summary, runId);
+    } catch (err) {
+      logger.error(
+        `[LP] Failed snapshot tokenId=${row.tokenId} on ${chainId}:`,
+        err?.message || err
+      );
     }
   }
 
-  return summaries;
+  cleanupLpSnapshots(runId);
 }
 
 // -----------------------------
@@ -638,11 +761,15 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
     lpStatusOnly,
   } = row;
   const prevStatus = extractPrevRangeStatus(prevStateJson);
+  const snapshotAt = getLpSnapshotAt({ userId, walletId, contractId, tokenId });
 
   const tokenIdBN = BigInt(tokenId);
   const pm = new ethers.Contract(contract, positionManagerAbi, provider);
   const pos = await pm.positions(tokenIdBN);
 
+  const tokensOwed0Raw = pos.tokensOwed0 != null ? pos.tokensOwed0.toString() : "0";
+  const tokensOwed1Raw = pos.tokensOwed1 != null ? pos.tokensOwed1.toString() : "0";
+  
   const liquidity = BigInt(pos.liquidity.toString());
   const token0 = pos.token0;
   const token1 = pos.token1;
@@ -686,6 +813,7 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
       currentStatus: "INACTIVE",
       isActive: false,
       lpRangeTier: "UNKNOWN",
+      lpRangeLabel: null,
       tickLower: null,
       tickUpper: null,
       currentTick: null,
@@ -701,6 +829,7 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
       currentPrice: null,
       priceBaseSymbol: sym0,
       priceQuoteSymbol: sym1,
+      snapshotAt,
     });
     return;
   }
@@ -733,6 +862,7 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
   let currentStatus = "UNKNOWN";
   let poolAddr = null;
   let currentTick = null;
+  let sqrtPriceX96 = null;
 
   const tickToPrice = (tick) => {
     if (!Number.isFinite(tick)) return null;
@@ -753,7 +883,9 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
         const pool = new ethers.Contract(poolAddr, uniswapV3PoolAbi, provider);
         const slot0 = await pool.slot0();
         const tick = slot0.tick !== undefined ? slot0.tick : slot0[1];
+        const sp = slot0.sqrtPriceX96 !== undefined ? slot0.sqrtPriceX96 : slot0[0];
         currentTick = Number(tick);
+        sqrtPriceX96 = sp ? sp.toString() : null;
 
         if (Number.isFinite(currentTick)) {
           currentTick = applyLpTickShift(currentTick, tickLower, tickUpper);
@@ -773,6 +905,97 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
   const lpClass = classifyLpRangeTier(currentStatus, tickLower, tickUpper, currentTick);
   const isActive = lpClass.tier !== "UNKNOWN";
 
+  // principal token amounts (best-effort)
+  let amount0 = null;
+  let amount1 = null;
+  if (sqrtPriceX96) {
+    try {
+      const { amount0Raw, amount1Raw } = amountsForPosition({
+        sqrtPriceX96,
+        tickLower,
+        tickUpper,
+        liquidity: liquidity.toString(),
+      });
+      amount0 = Number(ethers.formatUnits(amount0Raw, dec0));
+      amount1 = Number(ethers.formatUnits(amount1Raw, dec1));
+    } catch (_) {}
+  }
+
+  // fees: prefer simulated collect() (live), fallback to tokensOwed*
+  let fee0Raw = tokensOwed0Raw;
+  let fee1Raw = tokensOwed1Raw;
+
+  let simWorked = false;
+  let feeSource = "tokensOwed";
+  try {
+    const sim = await simulateCollectFees(pm, tokenIdBN, owner);
+    if (sim?.fee0Raw != null && sim?.fee1Raw != null) {
+      fee0Raw = sim.fee0Raw;
+      fee1Raw = sim.fee1Raw;
+      simWorked = true;
+      feeSource = "collectSim";
+    } else {
+      logger.debug(
+        `[LP][${chainId}] collectSim unavailable tokenId=${tokenId}: no fee data returned`
+      );
+    }
+  } catch (err) {
+    logger.debug(
+      `[LP][${chainId}] collectSim FAILED tokenId=${tokenId}: ${err?.shortMessage || err?.message || err}`
+    );
+  }
+
+  // If sim gives 0/0 (or doesn’t work) but we have a pool + tick, compute via feeGrowth math
+  try {
+    const bothZero = fee0Raw === "0" && fee1Raw === "0";
+    if ((bothZero || !simWorked) && poolAddr && Number.isFinite(currentTick)) {
+      const pool = new ethers.Contract(poolAddr, uniswapV3PoolAbi, provider);
+
+      const MAX_UINT256 = (1n << 256n) - 1n;
+      const SANE_MAX = 1n << 255n;
+      const fg0Raw = toBigIntish(pos.feeGrowthInside0LastX128);
+      const fg1Raw = toBigIntish(pos.feeGrowthInside1LastX128);
+      const fg0 = fg0Raw > SANE_MAX ? 0n : fg0Raw;
+      const fg1 = fg1Raw > SANE_MAX ? 0n : fg1Raw;
+      if (fg0Raw === MAX_UINT256 || fg1Raw === MAX_UINT256 || fg0Raw > SANE_MAX || fg1Raw > SANE_MAX) {
+        logger.debug(
+          `[LP][${chainId}] feeGrowthInside out-of-range tokenId=${tokenId}; treating as 0`
+        );
+      }
+
+      const computed = await computeFeesOwedFromPool({
+        pool,
+        currentTick,
+        tickLower,
+        tickUpper,
+        liquidity: liquidity.toString(),
+        feeGrowthInside0LastX128: fg0,
+        feeGrowthInside1LastX128: fg1,
+        tokensOwed0: pos.tokensOwed0,
+        tokensOwed1: pos.tokensOwed1,
+      });
+
+      fee0Raw = computed.fee0Raw;
+      fee1Raw = computed.fee1Raw;
+      feeSource = "feeGrowth";
+    }
+  } catch (err) {
+    logger.warn(
+      `[LP][${chainId}] feeGrowth fallback FAILED tokenId=${tokenId}: ${err.shortMessage || err.message}`
+    );
+  }
+
+  let fees0 = null;
+  let fees1 = null;
+  try { fees0 = Number(ethers.formatUnits(fee0Raw, dec0)); } catch (_) {}
+  try { fees1 = Number(ethers.formatUnits(fee1Raw, dec1)); } catch (_) {}
+
+  logger.debug(
+    `[LP][${chainId}] fee source=${feeSource} tokenId=${tokenId} ` +
+      `pool=${poolAddr || "n/a"} tick=${Number.isFinite(currentTick) ? currentTick : "n/a"} ` +
+      `fees0=${fees0 ?? "n/a"} fees1=${fees1 ?? "n/a"}`
+  );
+
   await handleLpRangeAlert({
     userId,
     walletId,
@@ -782,6 +1005,7 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
     currentStatus,
     isActive,
     lpRangeTier: lpClass.tier,
+    lpRangeLabel: lpClass.label,
     tickLower,
     tickUpper,
     currentTick,
@@ -797,6 +1021,7 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
     currentPrice,
     priceBaseSymbol: sym0,
     priceQuoteSymbol: sym1,
+    snapshotAt,
   });
 
   if (verbose) {
@@ -827,7 +1052,7 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
 
   const tierPart = lpClass.tier && lpClass.tier !== "UNKNOWN" ? ` (tier ${lpClass.tier})` : "";
 
-  logger.info(`${protocol} ${pairLabel || "UNKNOWN_PAIR"} is ACTIVE ${humanRange}${tierPart}.`);
+  logger.debug(`${protocol} ${pairLabel || "UNKNOWN_PAIR"} is ACTIVE ${humanRange}${tierPart}.`);
 }
 
 // -----------------------------
@@ -880,5 +1105,7 @@ async function monitorLPs(options = {}) {
 module.exports = {
   monitorLPs,
   getLpSummaries,
+  refreshLpSnapshots,
   formatBandRuler,
+  classifyLpRangeTier,
 };

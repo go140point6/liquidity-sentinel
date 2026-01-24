@@ -370,6 +370,49 @@ CREATE INDEX idx_alert_log_position
   ON alert_log(wallet_id, contract_id, token_id);
 
 -- =========================================================
+-- POSITION SNAPSHOTS (COMMAND CACHE)
+-- =========================================================
+CREATE TABLE loan_position_snapshots (
+  user_id         INTEGER NOT NULL,
+  wallet_id       INTEGER NOT NULL,
+  contract_id     INTEGER NOT NULL,
+  token_id        TEXT NOT NULL,
+  chain_id        TEXT NOT NULL,
+  protocol        TEXT NOT NULL,
+  wallet_label    TEXT,
+  snapshot_run_id TEXT NOT NULL,
+  snapshot_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  snapshot_json   TEXT NOT NULL,
+  PRIMARY KEY (user_id, wallet_id, contract_id, token_id),
+  FOREIGN KEY (user_id)     REFERENCES users(id)        ON DELETE CASCADE,
+  FOREIGN KEY (wallet_id)   REFERENCES user_wallets(id) ON DELETE CASCADE,
+  FOREIGN KEY (contract_id) REFERENCES contracts(id)    ON DELETE CASCADE
+);
+
+CREATE TABLE lp_position_snapshots (
+  user_id         INTEGER NOT NULL,
+  wallet_id       INTEGER NOT NULL,
+  contract_id     INTEGER NOT NULL,
+  token_id        TEXT NOT NULL,
+  chain_id        TEXT NOT NULL,
+  protocol        TEXT NOT NULL,
+  wallet_label    TEXT,
+  snapshot_run_id TEXT NOT NULL,
+  snapshot_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  snapshot_json   TEXT NOT NULL,
+  PRIMARY KEY (user_id, wallet_id, contract_id, token_id),
+  FOREIGN KEY (user_id)     REFERENCES users(id)        ON DELETE CASCADE,
+  FOREIGN KEY (wallet_id)   REFERENCES user_wallets(id) ON DELETE CASCADE,
+  FOREIGN KEY (contract_id) REFERENCES contracts(id)    ON DELETE CASCADE
+);
+
+CREATE INDEX idx_loan_snapshots_user
+  ON loan_position_snapshots(user_id);
+
+CREATE INDEX idx_lp_snapshots_user
+  ON lp_position_snapshots(user_id);
+
+-- =========================================================
 -- UPDATED_AT TRIGGERS
 -- =========================================================
 CREATE TRIGGER trg_contracts_updated_at

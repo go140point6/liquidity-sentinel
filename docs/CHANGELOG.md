@@ -4,6 +4,16 @@ All notable, user-facing changes are documented here.
 
 ---
 
+## [2026-01-23]
+
+### Added
+- Redemption risk now uses debt-ahead depth and shows a clearer position bar plus debt-ahead context.
+- Staleness warnings for snapshot data in alerts, commands, and the daily heartbeat.
+
+### Changed
+- Daily heartbeat loan layout tightened with clearer liquidation/redemption sections and meaning lines.
+- `/test-alerts` expanded for debt-ahead and per-protocol testing (IR and liquidation).
+
 ## [2026-01-22]
 
 ### Added

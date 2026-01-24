@@ -8,7 +8,24 @@ const { ephemeralFlags } = require("../utils/discord/ephemerals");
 const { createDecimalFormatter } = require("../utils/intlNumberFormats");
 const { formatLoanTroveLink } = require("../utils/links");
 const logger = require("../utils/logger");
-const { getTestOffsets } = require("../monitoring/testOffsets");
+const { getTestOffsets, getDebtAheadOffsetPpForProtocol } = require("../monitoring/testOffsets");
+
+function requireNumberEnv(name) {
+  const raw = process.env[name];
+  if (!raw || String(raw).trim() === "") {
+    throw new Error(`Missing env var ${name}`);
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n)) throw new Error(`Env var ${name} must be numeric (got "${raw}")`);
+  return n;
+}
+
+const SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SNAPSHOT_STALE_WARN_MIN");
+const SNAPSHOT_STALE_WARN_MS = Math.max(0, Math.floor(SNAPSHOT_STALE_WARN_MIN * 60 * 1000));
+
+const REDEMP_DEBT_AHEAD_LOW_PCT = Number(process.env.REDEMP_DEBT_AHEAD_LOW_PCT);
+const REDEMP_DEBT_AHEAD_MED_PCT = Number(process.env.REDEMP_DEBT_AHEAD_MED_PCT);
+const REDEMP_DEBT_AHEAD_HIGH_PCT = Number(process.env.REDEMP_DEBT_AHEAD_HIGH_PCT);
 
 function chunk(arr, size) {
   const out = [];
@@ -16,12 +33,18 @@ function chunk(arr, size) {
   return out;
 }
 
+const fmt2 = createDecimalFormatter(0, 2);
 const fmt4 = createDecimalFormatter(0, 4);
 const fmt5 = createDecimalFormatter(0, 5);
 
 function fmtNum(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return "n/a";
   return fmt4.format(n);
+}
+
+function fmtNum2(n) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return "n/a";
+  return fmt2.format(n);
 }
 
 function fmtNum5(n) {
@@ -34,6 +57,44 @@ function shortId(id, head = 4, tail = 4) {
   const s = String(id);
   if (s.length <= head + tail + 1) return s;
   return `${s.slice(0, head)}…${s.slice(-tail)}`;
+}
+
+function classifyDebtAheadTier(pct) {
+  const v = Number(pct);
+  if (!Number.isFinite(v)) return "UNKNOWN";
+  if (!Number.isFinite(REDEMP_DEBT_AHEAD_LOW_PCT)) return "UNKNOWN";
+  if (v >= REDEMP_DEBT_AHEAD_LOW_PCT) return "LOW";
+  if (!Number.isFinite(REDEMP_DEBT_AHEAD_MED_PCT)) return "UNKNOWN";
+  if (v >= REDEMP_DEBT_AHEAD_MED_PCT) return "MEDIUM";
+  if (!Number.isFinite(REDEMP_DEBT_AHEAD_HIGH_PCT)) return "UNKNOWN";
+  if (v >= REDEMP_DEBT_AHEAD_HIGH_PCT) return "HIGH";
+  return "CRITICAL";
+}
+
+function clamp01(n) {
+  if (!Number.isFinite(n)) return n;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return n;
+}
+
+function renderPositionBar(pct) {
+  if (pct == null || !Number.isFinite(pct)) return "0% |---------------------| 100%";
+  const barLen = 21;
+  const idx = Math.max(0, Math.min(barLen, Math.round(pct * barLen)));
+  const left = "-".repeat(idx);
+  const right = "-".repeat(barLen - idx);
+  return `0% |${left}o${right}| 100%`;
+}
+
+function redemptionMeaning(tier, aheadPctText) {
+  const t = (tier || "UNKNOWN").toString().toUpperCase();
+  const suffix = aheadPctText ? ` with ${aheadPctText} of total loan debt in front of it.` : ".";
+  if (t === "LOW") return `Your loan is comfortably safe from redemption${suffix}`;
+  if (t === "MEDIUM") return `Your loan is safe, but at slight risk of redemption${suffix}`;
+  if (t === "HIGH") return `Your loan is at elevated risk of redemption${suffix}`;
+  if (t === "CRITICAL") return `Your loan is at severe risk of redemption${suffix}`;
+  return "Redemption risk is unknown.";
 }
 
 module.exports = {
@@ -111,10 +172,41 @@ module.exports = {
       if (cdpPrice == null) {
         descLines.push("CDP price: *(unknown; CDP price source unavailable)*");
       } else {
+        const trigger = Number(cdpState.trigger);
+        const diff = typeof cdpState.diff === "number" && Number.isFinite(cdpState.diff)
+          ? cdpState.diff
+          : null;
+        const aboveBelow = diff == null ? "unknown" : diff >= 0 ? "above" : "below";
+        const diffText =
+          diff == null ? "n/a" : `${Math.abs(diff).toFixed(4)}`;
+        const attractText =
+          diff == null
+            ? "redemption attractiveness unknown"
+            : diff < 0
+            ? "redemption is economically attractive"
+            : "redemption is less attractive";
         descLines.push(
-        `CDP: **${fmtNum(cdpPrice)} USD**, redemption state **${cdpState.state}** ` +
-          `(trigger **${fmtNum(Number(cdpState.trigger))}**, ${cdpState.label}).`
+          `CDP: **${fmtNum(cdpPrice)} USD** — ${attractText} (trigger **${fmtNum(trigger)}**, ` +
+            `**${diff < 0 ? "-" : "+"}${diffText}** ${aboveBelow})`
         );
+      }
+
+      const snapshotTimes = summaries
+        .map((s) => (s.snapshotAt ? String(s.snapshotAt) : null))
+        .filter(Boolean)
+        .map((raw) => {
+          const iso = raw.includes("T") ? raw : raw.replace(" ", "T");
+          const ts = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
+          return Number.isFinite(ts) ? Math.floor(ts / 1000) : null;
+        })
+        .filter((v) => v != null);
+      if (snapshotTimes.length) {
+        const latest = Math.max(...snapshotTimes);
+        const ageMs = Date.now() - latest * 1000;
+        const stale = ageMs > SNAPSHOT_STALE_WARN_MS;
+        const warn = stale ? " ⚠️ Data may be stale." : "";
+        descLines.push("");
+        descLines.push(`Data captured: <t:${latest}:f>${warn}`);
       }
 
       const fields = summaries.map((s) => {
@@ -156,13 +248,44 @@ module.exports = {
           }
           valueLines.push(irLine);
 
-          if (s.redemptionTier) {
-            const diff =
-              typeof s.redemptionDiffPct === "number"
-                ? ` (Δ ${s.redemptionDiffPct >= 0 ? "+" : ""}${s.redemptionDiffPct.toFixed(2)} pp vs global)`
-                : "";
-            valueLines.push(`Redemption tier (IR-based): **${s.redemptionTier}**${diff}`);
+        if (s.redemptionTier) {
+          let pctVal =
+            typeof s.redemptionDebtAheadPct === "number" && Number.isFinite(s.redemptionDebtAheadPct)
+              ? s.redemptionDebtAheadPct
+              : null;
+          let tierVal = s.redemptionTier;
+          const offsetPp = getDebtAheadOffsetPpForProtocol(s.protocol);
+          if (pctVal != null && Number.isFinite(offsetPp) && offsetPp !== 0) {
+            const adjustedPct = clamp01(pctVal + offsetPp / 100);
+            pctVal = adjustedPct;
+            tierVal = classifyDebtAheadTier(adjustedPct);
           }
+          const pct =
+            typeof pctVal === "number" && Number.isFinite(pctVal)
+              ? ` (${(pctVal * 100).toFixed(2)}% ahead)`
+              : "";
+          const aheadPctText =
+            typeof pctVal === "number" && Number.isFinite(pctVal)
+              ? `${(pctVal * 100).toFixed(2)}%`
+              : null;
+          const totalDebtVal =
+            typeof s.redemptionTotalDebt === "number" && Number.isFinite(s.redemptionTotalDebt)
+              ? s.redemptionTotalDebt
+              : null;
+          const debtAheadVal =
+            pctVal != null && totalDebtVal != null
+              ? pctVal * totalDebtVal
+              : typeof s.redemptionDebtAhead === "number" && Number.isFinite(s.redemptionDebtAhead)
+                ? s.redemptionDebtAhead
+                : null;
+          valueLines.push(
+            `Redemption debt: **${fmtNum2(debtAheadVal)}** vs total **${fmtNum2(totalDebtVal)}**`
+          );
+          valueLines.push(`Redemption tier: **${tierVal}**${pct} - Higher is safer`);
+          valueLines.push(`Redemption position: ${renderPositionBar(pctVal)}`);
+          valueLines.push(`Meaning: ${redemptionMeaning(tierVal, aheadPctText)}`);
+        }
+
         }
 
         let value = valueLines.join("\n");

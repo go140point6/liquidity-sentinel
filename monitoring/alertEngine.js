@@ -36,6 +36,37 @@ function formatTierList(currentTier) {
     .join("\n");
 }
 
+function renderPositionBar(pct) {
+  if (pct == null || !Number.isFinite(pct)) return "0% |---------------------| 100%";
+  const barLen = 21;
+  const idx = Math.max(0, Math.min(barLen, Math.round(pct * barLen)));
+  const left = "-".repeat(idx);
+  const right = "-".repeat(barLen - idx);
+  return `0% |${left}o${right}| 100%`;
+}
+
+function formatSnapshotLine(snapshotAt) {
+  if (!snapshotAt) return null;
+  const raw = String(snapshotAt);
+  const iso = raw.includes("T") ? raw : raw.replace(" ", "T");
+  const tsMs = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
+  if (!Number.isFinite(tsMs)) return null;
+  const ts = Math.floor(tsMs / 1000);
+  const stale = Date.now() - tsMs > SNAPSHOT_STALE_WARN_MS;
+  const warn = stale ? " ⚠️ Data may be stale." : "";
+  return `<t:${ts}:f>${warn}`;
+}
+
+function redemptionMeaning(tier, aheadPctText) {
+  const t = (tier || "UNKNOWN").toString().toUpperCase();
+  const aheadSuffix = aheadPctText ? ` with ${aheadPctText} of total loan debt in front of it.` : ".";
+  if (t === "LOW") return `Your loan is comfortably safe from redemption${aheadSuffix}`;
+  if (t === "MEDIUM") return `Your loan is safe, but at slight risk of redemption${aheadSuffix}`;
+  if (t === "HIGH") return `Your loan is at elevated risk of redemption${aheadSuffix}`;
+  if (t === "CRITICAL") return `Your loan is at severe risk of redemption${aheadSuffix}`;
+  return "Redemption risk is unknown.";
+}
+
 let _client = null;
 function setAlertEngineClient(client) {
   _client = client;
@@ -63,6 +94,9 @@ function requireNumberEnv(name) {
   }
   return n;
 }
+
+const SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SNAPSHOT_STALE_WARN_MIN");
+const SNAPSHOT_STALE_WARN_MS = Math.max(0, Math.floor(SNAPSHOT_STALE_WARN_MIN * 60 * 1000));
 
 // -----------------------------
 // LP debounce/cooldown config (STRICT)
@@ -215,17 +249,16 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
     if (alertType === "REDEMPTION") {
       if (phase === "NEW" || phase === "RESOLVED") return;
       const fmt2 = (v) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(2) : "n/a");
+      const fmt2c = (v) =>
+        typeof v === "number" && Number.isFinite(v)
+          ? new Intl.NumberFormat("en-US", {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            }).format(v)
+          : "n/a";
       const prevTier = meta?.prevTier || "UNKNOWN";
       const newTier = meta?.newTier || "UNKNOWN";
       const trend = trendLabel(prevTier, newTier, ["LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"]);
-      const deltaIr =
-        typeof meta?.loanIR === "number" && typeof meta?.globalIR === "number"
-          ? meta.loanIR - meta.globalIR
-          : null;
-      const deltaText =
-        deltaIr == null || !Number.isFinite(deltaIr)
-          ? "n/a"
-          : `Δ ${deltaIr >= 0 ? "+" : ""}${deltaIr.toFixed(2)} pp`;
       const headline =
         trend.label === "Improving"
           ? { text: "Improving", emoji: "🟢" }
@@ -259,22 +292,44 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
         { name: "Wallet", value: walletText, inline: true },
       ];
       if (meta?.walletLabel) fields.push({ name: "Label", value: meta.walletLabel, inline: true });
+      const debtAheadPct =
+        typeof meta?.debtAheadPct === "number" && Number.isFinite(meta.debtAheadPct)
+          ? meta.debtAheadPct
+          : null;
+      const debtAheadText = fmt2c(meta?.debtAhead);
+      const debtTotalText = fmt2c(meta?.debtTotal);
+      const aheadPctText =
+        debtAheadPct == null ? "n/a" : `${(debtAheadPct * 100).toFixed(2)}%`;
+      const aheadMeaning = aheadPctText !== "n/a" ? aheadPctText : null;
+      const deltaIr =
+        typeof meta?.loanIR === "number" && typeof meta?.globalIR === "number"
+          ? meta.loanIR - meta.globalIR
+          : null;
+      const deltaText =
+        deltaIr == null || !Number.isFinite(deltaIr)
+          ? "n/a"
+          : `Δ ${deltaIr >= 0 ? "+" : ""}${deltaIr.toFixed(2)} pp`;
       fields.push(
         { name: "Loan IR", value: `${fmt2(meta?.loanIR)}%`, inline: true },
         { name: "Global IR", value: `${fmt2(meta?.globalIR)}%`, inline: true },
         { name: "Delta IR", value: deltaText, inline: true },
+        { name: "Debt Ahead", value: debtAheadText, inline: true },
+        { name: "Debt Total", value: debtTotalText, inline: true },
+        { name: "Ahead %", value: aheadPctText, inline: true },
+        {
+          name: "Redemption Position - Higher is safer",
+          value: renderPositionBar(debtAheadPct),
+          inline: false,
+        },
         { name: "Tier", value: formatTierList(newTier), inline: false },
         {
           name: "Meaning",
-          value:
-            trend.label === "Improving"
-              ? "Your loan is less likely to be redeemed."
-              : trend.label === "Worsening"
-              ? "Your loan is closer to being redeemed."
-              : "Redemption risk unchanged.",
+          value: redemptionMeaning(newTier, aheadMeaning),
           inline: false,
         }
       );
+      const snapshotLine = formatSnapshotLine(meta?.snapshotAt);
+      if (snapshotLine) fields.push({ name: "Data captured", value: snapshotLine, inline: false });
       embed.addFields(fields);
 
       await user.send({ embeds: [embed] });
@@ -284,6 +339,7 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
     if (alertType === "LIQUIDATION") {
       if (phase === "NEW" || phase === "RESOLVED") return;
       const fmt2 = (v) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(2) : "n/a");
+      const fmt4 = (v) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(4) : "n/a");
       const prevTier = meta?.prevTier || "UNKNOWN";
       const newTier = meta?.newTier || "UNKNOWN";
       const trend = trendLabel(prevTier, newTier, ["LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"]);
@@ -329,21 +385,32 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
         { name: "Buffer", value: bufferPct, inline: true },
         {
           name: "Price / Liq",
-          value: `${fmt2(meta?.currentPrice)} / ${fmt2(meta?.liquidationPrice)}`,
+          value: `${fmt4(meta?.currentPrice)} / ${fmt4(meta?.liquidationPrice)}`,
           inline: true,
+        },
+        {
+          name: "Liquidation Position - Higher is safer",
+          value: renderPositionBar(meta?.liquidationBufferFrac),
+          inline: false,
         },
         { name: "Tier", value: formatTierList(newTier), inline: false },
         {
           name: "Meaning",
           value:
-            trend.label === "Improving"
-              ? "Your loan is less likely to be liquidated."
-              : trend.label === "Worsening"
-              ? "Your loan is closer to being liquidated."
-              : "Liquidation risk unchanged.",
+            newTier === "LOW"
+              ? "Your loan is comfortably safe from liquidation."
+              : newTier === "MEDIUM"
+              ? "Your loan is safe, but at slight risk of liquidation."
+              : newTier === "HIGH"
+              ? "Your loan is at elevated risk of liquidation."
+              : newTier === "CRITICAL"
+              ? "Your loan is at severe risk of liquidation."
+              : "Liquidation risk is unknown.",
           inline: false,
         }
       );
+      const snapshotLine = formatSnapshotLine(meta?.snapshotAt);
+      if (snapshotLine) fields.push({ name: "Data captured", value: snapshotLine, inline: false });
       embed.addFields(fields);
 
       await user.send({ embeds: [embed] });
@@ -412,36 +479,8 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
       });
       const tierValue = tierLines.join("\n");
 
-      let meaning = "Status unchanged.";
-      if (statusChanged) {
-        if (currentStatus === "IN_RANGE") {
-          if (newTier === "LOW") meaning = "Back in range, comfortably in range.";
-          else if (newTier === "MEDIUM") meaning = "Back in range, getting close to edge.";
-          else if (newTier === "HIGH") meaning = "Back in range, very close to edge.";
-          else if (newTier === "CRITICAL") meaning = "Back in range, at the edge.";
-          else meaning = "Back in range.";
-        }
-        else if (currentStatus === "OUT_OF_RANGE") meaning = "Moved out of range.";
-        else if (currentStatus === "INACTIVE") meaning = "Position is inactive.";
-        else meaning = "Status changed.";
-      } else if (tierChanged) {
-        if (currentStatus === "OUT_OF_RANGE") {
-          if (trend.label === "Improving") meaning = "Still out of range, but now moving closer to range.";
-          else if (trend.label === "Worsening")
-            meaning = "Still out of range, but now moving farther from range.";
-          else meaning = "Still out of range.";
-        } else if (currentStatus === "IN_RANGE") {
-          if (newTier === "LOW") meaning = "Still in range, but now comfortably in range.";
-          else if (newTier === "MEDIUM") meaning = "Still in range, but now getting close to edge.";
-          else if (newTier === "HIGH") meaning = "Still in range, but now very close to edge.";
-          else if (newTier === "CRITICAL") meaning = "Still in range, but now at the edge.";
-          else meaning = "Still in range.";
-        } else if (currentStatus === "INACTIVE") {
-          meaning = "Still inactive.";
-        } else {
-          meaning = "Status unchanged.";
-        }
-      }
+      const lpRangeLabel = meta?.lpRangeLabel || null;
+      let meaning = lpRangeLabel || "Status unchanged.";
 
       const labelFromStatus = () => {
         if (currentStatus === "IN_RANGE") return { text: "Improving", emoji: "🟢" };
@@ -507,6 +546,8 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
               { name: "Meaning", value: meaning, inline: false },
             ])
       );
+      const snapshotLine = formatSnapshotLine(meta?.snapshotAt);
+      if (snapshotLine) fields.push({ name: "Data captured", value: snapshotLine, inline: false });
       embed.addFields(fields);
 
       await user.send({ embeds: [embed] });
@@ -857,6 +898,7 @@ async function handleLiquidationAlert(data) {
     liquidationPrice,
     currentPrice,
     liquidationBufferFrac,
+    snapshotAt,
     protocol,
     wallet,
     walletLabel,
@@ -947,6 +989,7 @@ async function handleLiquidationAlert(data) {
             liquidationPrice,
             currentPrice,
             liquidationBufferFrac,
+            snapshotAt,
           },
           alertType,
         });
@@ -1008,6 +1051,7 @@ async function handleLiquidationAlert(data) {
           liquidationPrice,
           currentPrice,
           liquidationBufferFrac,
+          snapshotAt,
         },
         alertType,
       });
@@ -1090,6 +1134,7 @@ async function handleLiquidationAlert(data) {
           liquidationPrice,
           currentPrice,
           liquidationBufferFrac,
+          snapshotAt,
         },
         alertType,
       });
@@ -1195,6 +1240,7 @@ async function handleLiquidationAlert(data) {
           liquidationPrice,
           currentPrice,
           liquidationBufferFrac,
+          snapshotAt,
         },
         alertType,
       });
@@ -1227,11 +1273,12 @@ async function handleLiquidationAlert(data) {
         troveId: shortenTroveId(tokenId),
         prevTier: prevTierU,
         newTier: tierU,
-        ltvPct,
-        liquidationPrice,
-        currentPrice,
-        liquidationBufferFrac,
-      },
+          ltvPct,
+          liquidationPrice,
+          currentPrice,
+          liquidationBufferFrac,
+          snapshotAt,
+        },
       alertType,
       notifyOnResolved: false,
     });
@@ -1267,6 +1314,7 @@ async function handleLiquidationAlert(data) {
       liquidationPrice,
       currentPrice,
       liquidationBufferFrac,
+      snapshotAt,
     },
     alertType,
   });
@@ -1280,8 +1328,12 @@ async function handleRedemptionAlert(data) {
     positionId,
     isActive: observedActive,
     tier,
-    cdpIR,
+    debtAheadPct,
+    debtAhead,
+    debtTotal,
+    loanIR,
     globalIR,
+    snapshotAt,
     isCDPActive,
     protocol,
     wallet,
@@ -1317,15 +1369,24 @@ async function handleRedemptionAlert(data) {
   let cand = prevObj?.candidateStatus ? String(prevObj.candidateStatus) : null;
   let candSinceMs = Number(prevObj?.candidateSinceMs || 0) || 0;
 
-  const diff = typeof cdpIR === "number" && typeof globalIR === "number" ? cdpIR - globalIR : null;
-
   const sigPayload = {
     tier: tierU,
     isCDPActive: Boolean(isCDPActive),
-    diffB: diff == null || !Number.isFinite(diff) ? null : Math.round(diff * 2),
+    debtAheadB:
+      debtAheadPct == null || !Number.isFinite(debtAheadPct)
+        ? null
+        : Math.round(debtAheadPct * 10000),
   };
 
-  const baseState = { kind: "LOAN", tier: tierU, cdpIR, globalIR, isCDPActive, lastTierChangeAtMs };
+  const baseState = {
+    kind: "LOAN",
+    tier: tierU,
+    debtAheadPct,
+    debtAhead,
+    debtTotal,
+    isCDPActive,
+    lastTierChangeAtMs,
+  };
 
   if (observedActiveFinal) {
     if (!prevActive) {
@@ -1364,8 +1425,12 @@ async function handleRedemptionAlert(data) {
             troveId: shortenTroveId(tokenId),
             prevTier: prevTierU,
             newTier: tierU,
-            loanIR: cdpIR,
+            debtAheadPct,
+            debtAhead,
+            debtTotal,
+            loanIR,
             globalIR,
+            snapshotAt,
           },
           alertType,
         });
@@ -1427,8 +1492,12 @@ async function handleRedemptionAlert(data) {
           troveId: shortenTroveId(tokenId),
           prevTier: prevTierU,
           newTier: tierU,
-          loanIR: cdpIR,
+          debtAheadPct,
+          debtAhead,
+          debtTotal,
+          loanIR,
           globalIR,
+          snapshotAt,
         },
         alertType,
       });
@@ -1511,8 +1580,12 @@ async function handleRedemptionAlert(data) {
         troveId: shortenTroveId(tokenId),
         prevTier: prevTierU,
         newTier: tierU,
-        loanIR: cdpIR,
+        debtAheadPct,
+        debtAhead,
+        debtTotal,
+        loanIR,
         globalIR,
+        snapshotAt,
       },
         alertType,
       });
@@ -1565,16 +1638,20 @@ async function handleRedemptionAlert(data) {
       message: `${protocol}`,
           meta: {
             wallet: shortenAddress(wallet),
-            walletLabel,
-            walletAddress: wallet,
-            chainId,
-            protocol,
-            troveId: shortenTroveId(tokenId),
-            prevTier: prevTierU,
-            newTier: tierU,
-            loanIR: cdpIR,
-            globalIR,
-          },
+          walletLabel,
+          walletAddress: wallet,
+          chainId,
+          protocol,
+          troveId: shortenTroveId(tokenId),
+          prevTier: prevTierU,
+          newTier: tierU,
+          debtAheadPct,
+          debtAhead,
+          debtTotal,
+          loanIR,
+          globalIR,
+          snapshotAt,
+        },
       alertType,
     });
     return;
@@ -1610,7 +1687,7 @@ async function handleRedemptionAlert(data) {
       return;
     }
 
-    const allowResolveNotify = Number.isFinite(globalIR);
+    const allowResolveNotify = Number.isFinite(debtAheadPct);
 
     await processAlert({
       userId,
@@ -1640,8 +1717,12 @@ async function handleRedemptionAlert(data) {
         troveId: shortenTroveId(tokenId),
         prevTier: prevTierU,
         newTier: tierU,
-        loanIR: cdpIR,
+        debtAheadPct,
+        debtAhead,
+        debtTotal,
+        loanIR,
         globalIR,
+        snapshotAt,
       },
       alertType,
       notifyOnResolved: allowResolveNotify,
@@ -1676,8 +1757,12 @@ async function handleRedemptionAlert(data) {
       troveId: shortenTroveId(tokenId),
       prevTier: prevTierU,
       newTier: tierU,
-      loanIR: cdpIR,
+      debtAheadPct,
+      debtAhead,
+      debtTotal,
+      loanIR,
       globalIR,
+      snapshotAt,
     },
     alertType,
   });
@@ -1709,6 +1794,8 @@ async function handleLpRangeAlert(data) {
     priceBaseSymbol,
     priceQuoteSymbol,
     lpStatusOnly,
+    snapshotAt,
+    lpRangeLabel,
   } = data;
 
   const tokenId = String(positionId);
@@ -1903,6 +1990,8 @@ async function handleLpRangeAlert(data) {
       newTier: tierU,
       lpRangeTier: tierU,
       lpStatusOnly: statusOnly,
+      lpRangeLabel,
+      snapshotAt,
     },
     alertType,
     notifyOnResolved: false,

@@ -14,6 +14,8 @@ const baseLogger = require("../utils/logger");
 const logger = baseLogger.forEnv("SCAN_DEBUG"); // required in .env (fail-fast)
 
 const { acquireLock, releaseLock } = require("../utils/lock");
+const { refreshLoanSnapshots } = require("../monitoring/loanMonitor");
+const { refreshLpSnapshots } = require("../monitoring/lpMonitor");
 
 // =========================================================
 // ENV VALIDATION (FAIL FAST)
@@ -80,6 +82,35 @@ if (!lockPath) {
   process.exit(0);
 }
 
+let lockReleased = false;
+function safeReleaseLock() {
+  if (lockReleased) return;
+  lockReleased = true;
+  try {
+    releaseLock(lockPath);
+  } catch (_) {}
+}
+
+process.once("exit", safeReleaseLock);
+process.once("SIGINT", () => {
+  safeReleaseLock();
+  process.exit(130);
+});
+process.once("SIGTERM", () => {
+  safeReleaseLock();
+  process.exit(143);
+});
+process.once("uncaughtException", (err) => {
+  logger.error("[scanLoanLpPositions] FATAL (uncaughtException):", err);
+  safeReleaseLock();
+  process.exit(1);
+});
+process.once("unhandledRejection", (err) => {
+  logger.error("[scanLoanLpPositions] FATAL (unhandledRejection):", err);
+  safeReleaseLock();
+  process.exit(1);
+});
+
 // =========================================================
 // CONSTANTS
 // =========================================================
@@ -145,6 +176,27 @@ function providerForChain(chainId) {
   if (chainId === "FLR") return new ethers.JsonRpcProvider(FLR_RPC_URL);
   if (chainId === "XDC") return new ethers.JsonRpcProvider(XDC_RPC_URL);
   throw new Error(`Unsupported chain_id: ${chainId}`);
+}
+
+async function initProvider(chainId, { maxAttempts = 3, backoffMs = 1000 } = {}) {
+  let attempt = 0;
+  let delay = backoffMs;
+  while (attempt < maxAttempts) {
+    attempt++;
+    const provider = providerForChain(chainId);
+    try {
+      await provider.getNetwork();
+      return provider;
+    } catch (err) {
+      logger.warn(
+        `[scanLoanLpPositions] ${chainId} provider init failed (attempt ${attempt}/${maxAttempts}): ${err?.message || err}`
+      );
+      if (attempt >= maxAttempts) throw err;
+      await sleep(delay);
+      delay = Math.min(delay * 2, 10000);
+    }
+  }
+  throw new Error(`Failed to init provider for ${chainId}`);
 }
 
 function scanBlocksForChain(chainId) {
@@ -471,11 +523,17 @@ async function main() {
 
     const providers = {};
     for (const c of contracts) {
-      providers[c.chain_id] ||= providerForChain(c.chain_id);
+      if (!providers[c.chain_id]) {
+        providers[c.chain_id] = await initProvider(c.chain_id);
+      }
       await scanContract(db, providers[c.chain_id], c);
     }
 
     log("\n[scanLoanLpPositions] DONE");
+    log("[scanLoanLpPositions] Refreshing cached snapshots...");
+    await refreshLoanSnapshots();
+    await refreshLpSnapshots();
+    log("[scanLoanLpPositions] Snapshot refresh complete.");
   } finally {
     db.close();
   }
@@ -484,8 +542,8 @@ async function main() {
 main()
   .catch((err) => {
     logger.error("[scanLoanLpPositions] FATAL:", err);
-    process.exit(1);
+    process.exitCode = 1;
   })
   .finally(() => {
-    releaseLock(lockPath);
+    safeReleaseLock();
   });

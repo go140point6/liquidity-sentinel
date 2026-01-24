@@ -21,6 +21,7 @@ Set `BOT_ENV=production` in prod to prevent dev-only commands (like `/test-alert
 The `/test-alerts` command modifies **in-memory** offsets to simulate:
 
 - Global IR up/down (percentage points)
+- Debt-ahead up/down (percentage points of total debt)
 - Loan price up/down (percent)
 - LP tick shift up/down (percent of position width)
 
@@ -29,11 +30,17 @@ When an IR offset is active, redemption state is forced to **ACTIVE** so you can
 
 Subcommands:
 
-- `ir` (increase/decrease global IR)
-- `liq` (increase/decrease loan price)
+- `ir` (increase/decrease global IR; optional per-protocol selector)
+- `debt-ahead` (increase/decrease debt-ahead; optional per-protocol selector)
+- `liq` (increase/decrease loan price; optional per-protocol selector)
 - `lp` (shift LP tick within/outside range)
 - `status` (show current offsets)
 - `reset` (clear all offsets)
+
+Notes:
+- If you select no protocol, the change applies to all loan protocols.
+- The command will attempt to show live before/after values from the latest snapshots.
+- `/my-loans` and `/my-lp` reflect test offsets for visual verification.
 
 ---
 

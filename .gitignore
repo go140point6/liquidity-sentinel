@@ -132,3 +132,4 @@ data/*.db*
 data/snapshots
 data/*.sqlite*
 data/archive
+ecosystem.config.js
