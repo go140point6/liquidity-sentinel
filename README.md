@@ -31,7 +31,7 @@ Tracked wallets and linked positions, built for a quick coverage check. Includes
 ### /redemption-rate
 Target interest rates for redemption risk tiers with live guidance on where your loan would land.
 
-<img src="img/redemption-rate" alt="/redemption-rate screenshot" width="720">
+<img src="img/redemption-rate.png" alt="/redemption-rate screenshot" width="720">
 
 ### /ignore-spam-tx
 Ignore noisy or irrelevant on-chain transactions to keep alerts focused on what matters.
