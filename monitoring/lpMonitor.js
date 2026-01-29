@@ -27,6 +27,18 @@ const { handleLpRangeAlert } = require("./alertEngine");
 const { applyLpTickShift, logRunApplied } = require("./testOffsets");
 const logger = require("../utils/logger");
 
+function requireNumberEnv(name) {
+  const raw = process.env[name];
+  if (raw == null || raw === "") {
+    throw new Error(`Missing required env var: ${name}`);
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    throw new Error(`Invalid number for env var ${name}: ${raw}`);
+  }
+  return n;
+}
+
 function getLpSnapshotAt({ userId, walletId, contractId, tokenId }) {
   const db = getDb();
   const row = db
@@ -42,6 +54,39 @@ function getLpSnapshotAt({ userId, walletId, contractId, tokenId }) {
     )
     .get(userId, walletId, contractId, String(tokenId));
   return row?.snapshot_at || null;
+}
+
+function getLpSnapshot({ userId, walletId, contractId, tokenId }) {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `
+      SELECT snapshot_json, snapshot_at
+      FROM lp_position_snapshots
+      WHERE user_id = ?
+        AND wallet_id = ?
+        AND contract_id = ?
+        AND token_id = ?
+      `
+    )
+    .get(userId, walletId, contractId, String(tokenId));
+  if (!row?.snapshot_json) return null;
+  try {
+    return { ...JSON.parse(row.snapshot_json), snapshotAt: row.snapshot_at };
+  } catch (_) {
+    return null;
+  }
+}
+
+function isSnapshotFresh(snapshotAt) {
+  if (!snapshotAt) return false;
+  const iso = String(snapshotAt).includes("T")
+    ? String(snapshotAt)
+    : String(snapshotAt).replace(" ", "T");
+  const tsMs = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
+  if (!Number.isFinite(tsMs)) return false;
+  const ageMin = (Date.now() - tsMs) / 60000;
+  return ageMin < SNAPSHOT_STALE_WARN_MIN;
 }
 
 // -----------------------------
@@ -61,6 +106,7 @@ const LP_EDGE_WARN_FRAC = Number(process.env.LP_EDGE_WARN_FRAC);
 const LP_EDGE_HIGH_FRAC = Number(process.env.LP_EDGE_HIGH_FRAC);
 const LP_OUT_WARN_FRAC = Number(process.env.LP_OUT_WARN_FRAC);
 const LP_OUT_HIGH_FRAC = Number(process.env.LP_OUT_HIGH_FRAC);
+const SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SNAPSHOT_STALE_WARN_MIN");
 
 // -----------------------------
 // Standard Uniswap v3 math
@@ -1100,6 +1146,119 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
   logger.debug(`${protocol} ${pairLabel || "UNKNOWN_PAIR"} is ACTIVE ${humanRange}${tierPart}.`);
 }
 
+async function describeLpFromSnapshot(row, snapshot, options = {}) {
+  if (!snapshot) return;
+  const { verbose = false } = options;
+  const {
+    userId,
+    walletId,
+    contractId,
+    owner,
+    tokenId,
+    walletLabel,
+    lpStatusOnly,
+    protocol,
+    chainId,
+  } = row;
+
+  const prevStatus = extractPrevRangeStatus(row.prevStateJson);
+  const snapshotAt = snapshot.snapshotAt || null;
+
+  const tickLower = Number(snapshot.tickLower);
+  const tickUpper = Number(snapshot.tickUpper);
+  const baseTick = Number(snapshot.currentTick);
+  let currentTick = Number.isFinite(baseTick)
+    ? applyLpTickShift(baseTick, tickLower, tickUpper)
+    : null;
+
+  let currentStatus = snapshot.rangeStatus || snapshot.status || "UNKNOWN";
+  if (Number.isFinite(currentTick) && Number.isFinite(tickLower) && Number.isFinite(tickUpper)) {
+    currentStatus = currentTick >= tickLower && currentTick < tickUpper ? "IN_RANGE" : "OUT_OF_RANGE";
+  }
+  currentStatus = String(currentStatus || "UNKNOWN").toUpperCase();
+
+  if (snapshot.status === "INACTIVE" || snapshot.rangeStatus === "INACTIVE") {
+    await handleLpRangeAlert({
+      userId,
+      walletId,
+      contractId,
+      positionId: tokenId,
+      prevStatus,
+      currentStatus: "INACTIVE",
+      isActive: false,
+      lpRangeTier: "UNKNOWN",
+      lpRangeLabel: null,
+      tickLower: null,
+      tickUpper: null,
+      currentTick: null,
+      protocol,
+      wallet: owner,
+      walletLabel,
+      walletAddress: owner,
+      chainId,
+      lpStatusOnly,
+      pairLabel: snapshot.pairLabel,
+      priceLower: null,
+      priceUpper: null,
+      currentPrice: null,
+      priceBaseSymbol: snapshot.token0Symbol,
+      priceQuoteSymbol: snapshot.token1Symbol,
+      snapshotAt,
+    });
+    return;
+  }
+
+  const lpClass = classifyLpRangeTier(currentStatus, tickLower, tickUpper, currentTick);
+
+  let currentPrice =
+    typeof snapshot.currentPrice === "number" && Number.isFinite(snapshot.currentPrice)
+      ? snapshot.currentPrice
+      : null;
+  if (currentPrice != null && Number.isFinite(baseTick) && Number.isFinite(currentTick)) {
+    const delta = currentTick - baseTick;
+    if (delta !== 0) {
+      currentPrice = currentPrice * Math.pow(1.0001, delta);
+    }
+  }
+
+  await handleLpRangeAlert({
+    userId,
+    walletId,
+    contractId,
+    positionId: tokenId,
+    prevStatus,
+    currentStatus,
+    isActive: currentStatus !== "UNKNOWN",
+    lpRangeTier: lpClass.tier,
+    lpRangeLabel: lpClass.label,
+    tickLower,
+    tickUpper,
+    currentTick,
+    protocol,
+    wallet: owner,
+    walletLabel,
+    walletAddress: owner,
+    chainId,
+    lpStatusOnly,
+    pairLabel: snapshot.pairLabel,
+    priceLower: snapshot.priceLower,
+    priceUpper: snapshot.priceUpper,
+    currentPrice,
+    priceBaseSymbol: snapshot.token0Symbol,
+    priceQuoteSymbol: snapshot.token1Symbol,
+    snapshotAt,
+  });
+
+  if (verbose) {
+    logger.debug("");
+    logger.debug("  --- Range Status (snapshot) ---");
+    logger.debug(`  range:         ${currentStatus}`);
+    logger.debug(`  range tier:    ${lpClass.tier} (${lpClass.label})`);
+    logger.debug("========================================");
+    logger.debug("");
+  }
+}
+
 // -----------------------------
 // Public API: monitorLPs
 // -----------------------------
@@ -1122,15 +1281,46 @@ async function monitorLPs(options = {}) {
   }
 
   for (const [chainId, chainRows] of byChain.entries()) {
-    let provider;
-    try {
-      provider = getProviderForChain(chainId, CHAINS_CONFIG);
-    } catch (err) {
-      logger.warn(`[LP] Skipping chain ${chainId}: ${err?.message || err}`);
-      continue;
-    }
+    let provider = null;
 
     for (const row of chainRows) {
+      const snap = getLpSnapshot({
+        userId: row.userId,
+        walletId: row.walletId,
+        contractId: row.contractId,
+        tokenId: row.tokenId,
+      });
+
+      const snapshotFresh = isSnapshotFresh(snap?.snapshotAt);
+      if (snapshotFresh) {
+        logger.debug(
+          `[LP] tokenId=${row.tokenId} ${row.protocol || "UNKNOWN_PROTOCOL"} ` +
+            `${row.chainId || chainId} using snapshot`
+        );
+        try {
+          await describeLpFromSnapshot(row, snap, { verbose });
+        } catch (err) {
+          logger.error(
+            `  [ERROR] Failed snapshot LP tokenId=${row.tokenId} on ${chainId}:`,
+              err?.message || err
+          );
+        }
+        continue;
+      }
+
+      logger.debug(
+        `[LP] tokenId=${row.tokenId} ${row.protocol || "UNKNOWN_PROTOCOL"} ` +
+          `${row.chainId || chainId} using RPC fallback`
+      );
+      if (!provider) {
+        try {
+          provider = getProviderForChain(chainId, CHAINS_CONFIG);
+        } catch (err) {
+          logger.warn(`[LP] Skipping chain ${chainId}: ${err?.message || err}`);
+          break;
+        }
+      }
+
       try {
         await describeLpPosition(provider, chainId, row.protocol || "UNKNOWN_PROTOCOL", row, {
           verbose,

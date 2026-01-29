@@ -65,9 +65,16 @@ function tierEmoji(tier) {
   );
 }
 
-function redemptionMeaning(tier, aheadPctText) {
+function redemptionMeaning(tier, aheadAmountText, aheadPctText) {
   const t = String(tier || "").toUpperCase();
-  const aheadSuffix = aheadPctText ? ` with ${aheadPctText} of total loan debt in front of it.` : ".";
+  let aheadSuffix = ".";
+  if (aheadAmountText && aheadPctText) {
+    aheadSuffix = ` with ${aheadAmountText} (${aheadPctText}) of total loan debt in front of it.`;
+  } else if (aheadAmountText) {
+    aheadSuffix = ` with ${aheadAmountText} of total loan debt in front of it.`;
+  } else if (aheadPctText) {
+    aheadSuffix = ` with ${aheadPctText} of total loan debt in front of it.`;
+  }
   if (t === "LOW") return `Your loan is comfortably safe from redemption${aheadSuffix}`;
   if (t === "MEDIUM") return `Your loan is safe, but at slight risk of redemption${aheadSuffix}`;
   if (t === "HIGH") return `Your loan is at elevated risk of redemption${aheadSuffix}`;
@@ -104,9 +111,9 @@ const loanContractChoices = loadLoanContracts()
   .map((r) => ({ name: r.protocol, value: r.protocol }))
   .slice(0, 25);
 
-function computeFeeFromSnapshot({ debtAmount, interestPct, lastInterestRateAdjTime }) {
+function computeFeeFromSnapshot({ debtAmount, avgRatePct, lastInterestRateAdjTime }) {
   const debt = Number(debtAmount);
-  const rate = Number(interestPct);
+  const rate = Number(avgRatePct);
   const lastAdj = Number(lastInterestRateAdjTime);
   if (!Number.isFinite(debt) || !Number.isFinite(rate) || !Number.isFinite(lastAdj) || lastAdj <= 0) {
     return { feeApplies: false, fee: 0, nextFree: null };
@@ -344,34 +351,53 @@ module.exports = {
           typeof loanInfo?.redemptionDebtAheadPct === "number"
             ? `${(loanInfo.redemptionDebtAheadPct * 100).toFixed(2)}%`
             : "n/a";
-      const offsetPp = getDebtAheadOffsetPpForProtocol(protocol);
-      let pctAdj = loanInfo?.redemptionDebtAheadPct;
-      let tierAdj = tierVal;
-      if (pctAdj != null && Number.isFinite(offsetPp) && offsetPp !== 0) {
-        pctAdj = clamp01(pctAdj + offsetPp / 100);
-        tierAdj = classifyDebtAheadTier(pctAdj);
-      }
-      const aheadPctAdjText =
-        typeof pctAdj === "number" && Number.isFinite(pctAdj)
-          ? `${(pctAdj * 100).toFixed(2)}%`
-          : aheadPctText;
+        const offsetPp = getDebtAheadOffsetPpForProtocol(protocol);
+        let pctAdj = loanInfo?.redemptionDebtAheadPct;
+        let tierAdj = tierVal;
+        if (pctAdj != null && Number.isFinite(offsetPp) && offsetPp !== 0) {
+          pctAdj = clamp01(pctAdj + offsetPp / 100);
+          tierAdj = classifyDebtAheadTier(pctAdj);
+        }
+        const aheadPctAdjText =
+          typeof pctAdj === "number" && Number.isFinite(pctAdj)
+            ? `${(pctAdj * 100).toFixed(2)}%`
+            : aheadPctText;
+        const aheadAmtAdj =
+          typeof pctAdj === "number" &&
+          Number.isFinite(pctAdj) &&
+          Number.isFinite(totalDebt) &&
+          totalDebt > 0
+            ? pctAdj * totalDebt
+            : typeof loanInfo?.redemptionDebtAhead === "number"
+              ? loanInfo.redemptionDebtAhead
+              : null;
+        const aheadAmtAdjText =
+          typeof aheadAmtAdj === "number" && Number.isFinite(aheadAmtAdj)
+            ? `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(
+                Math.floor(aheadAmtAdj)
+              )} CDP`
+            : null;
 
-      embed.addFields({
-        name: "Current loan tier",
-        value: `${tierEmoji(tierAdj)} ${tierAdj}: ${redemptionMeaning(tierAdj, aheadPctAdjText)}`,
-        inline: false,
-      });
+        embed.addFields({
+          name: "Current loan tier",
+          value: `${tierEmoji(tierAdj)} ${tierAdj}: ${redemptionMeaning(
+            tierAdj,
+            aheadAmtAdjText,
+            aheadPctAdjText
+          )}`,
+          inline: false,
+        });
       }
 
       const feeMeta = computeFeeFromSnapshot({
         debtAmount: loanInfo.debtAmount,
-        interestPct: loanIrPct,
+        avgRatePct: globalIrPct,
         lastInterestRateAdjTime: loanInfo.lastInterestRateAdjTime,
       });
 
       embed.addFields({
-        name: "Maximum Change fee (if updated now)",
-        value: feeMeta.feeApplies ? `${fmtNum(feeMeta.fee, 2)} CDP (estimated)` : "NONE",
+        name: "Change fee (if updated now)",
+        value: feeMeta.feeApplies ? `${fmtNum(feeMeta.fee, 2)} CDP` : "NONE",
         inline: false,
       });
 
@@ -395,6 +421,13 @@ module.exports = {
     }
 
     if (targets) {
+      const roundTargetIr = (tier, value) => {
+        if (value == null || !Number.isFinite(value)) return null;
+        const scaled = value * 10;
+        if (tier === "HIGH") return Math.floor(scaled) / 10;
+        if (tier === "LOW" || tier === "MEDIUM") return Math.ceil(scaled) / 10;
+        return Math.round(scaled) / 10;
+      };
       const fmtAhead = (amt) =>
         amt != null && Number.isFinite(amt)
           ? `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(
@@ -403,15 +436,19 @@ module.exports = {
           : "n/a";
       const tierLines = [
         `🟩 LOW - target IR = ${
-          targets.LOW != null ? fmtPct(targets.LOW, 1) : "n/a"
+          targets.LOW != null ? fmtPct(roundTargetIr("LOW", targets.LOW), 1) : "n/a"
         } (${fmtAhead(aheadAt.LOW)})`,
         `🟨 MEDIUM - target IR = ${
-          targets.MEDIUM != null ? fmtPct(targets.MEDIUM, 1) : "n/a"
+          targets.MEDIUM != null ? fmtPct(roundTargetIr("MEDIUM", targets.MEDIUM), 1) : "n/a"
         } (${fmtAhead(aheadAt.MEDIUM)})`,
         `🟧 HIGH - target IR = ${
-          targets.HIGH != null ? fmtPct(targets.HIGH, 1) : "n/a"
+          targets.HIGH != null ? fmtPct(roundTargetIr("HIGH", targets.HIGH), 1) : "n/a"
         } (${fmtAhead(aheadAt.HIGH)})`,
-        "🟥 CRITICAL",
+        `🟥 CRITICAL - any IR between 0.5 and ${
+          targets.HIGH != null
+            ? `${(roundTargetIr("HIGH", targets.HIGH) - 0.1).toFixed(1)}%`
+            : "n/a"
+        }`,
       ];
       embed.addFields({
         name: "Tier",

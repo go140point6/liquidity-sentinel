@@ -285,12 +285,19 @@ function colorForLpStatus(status) {
 
 function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client }) {
   const embeds = [];
-  const loanCount = loanSummaries?.length || 0;
-  const lpCount = lpSummaries?.length || 0;
+  const activeLoanSummaries = (loanSummaries || []).filter(
+    (s) => String(s.status || "").toUpperCase() !== "CLOSED"
+  );
+  const activeLpSummaries = (lpSummaries || []).filter((s) => {
+    const status = String(s.status || s.rangeStatus || "").toUpperCase();
+    return status !== "INACTIVE";
+  });
+  const loanCount = activeLoanSummaries.length;
+  const lpCount = activeLpSummaries.length;
 
   const snapshotTimes = []
-    .concat(loanSummaries || [])
-    .concat(lpSummaries || [])
+    .concat(activeLoanSummaries)
+    .concat(activeLpSummaries)
     .map((s) => parseSnapshotTs(s?.snapshotAt))
     .filter((v) => v != null);
   const latestSnapshot = snapshotTimes.length ? Math.max(...snapshotTimes) : null;
@@ -309,7 +316,7 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client }) {
   if (client?.user) header.setThumbnail(client.user.displayAvatarURL());
   embeds.push(header);
 
-  const loanFields = (loanSummaries || [])
+  const loanFields = activeLoanSummaries
     .slice()
     .sort((a, b) => {
       const av = typeof a.ltvPct === "number" ? a.ltvPct : -1;
@@ -326,7 +333,7 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client }) {
     const chunks = chunk(loanFields, 25);
     chunks.forEach((fields, idx) => {
       const fieldIds = new Set(fields.map((f) => f.name));
-      const chunkLoans = (loanSummaries || []).filter((s) => {
+      const chunkLoans = activeLoanSummaries.filter((s) => {
         const rawId = s.troveId ?? s.tokenId ?? s.positionId ?? "?";
         const troveId = shortenTroveId(rawId);
         const title = `${s.protocol || "UNKNOWN"} (${s.chainId || "?"}) — trove ${troveId}`;
@@ -349,7 +356,7 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client }) {
   }
 
   const order = { OUT_OF_RANGE: 0, UNKNOWN: 1, IN_RANGE: 2 };
-  const lpFields = (lpSummaries || [])
+  const lpFields = activeLpSummaries
     .slice()
     .sort((a, b) => {
       const ra = order[a.rangeStatus] ?? 99;
@@ -370,7 +377,7 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client }) {
     const chunks = chunk(lpFields, 25);
     chunks.forEach((fields, idx) => {
       const fieldIds = new Set(fields.map((f) => f.name));
-      const chunkLps = (lpSummaries || []).filter((s) => {
+      const chunkLps = activeLpSummaries.filter((s) => {
         const tokenId = s.tokenId ?? s.positionId ?? "?";
         const pair =
           s.pairLabel ||

@@ -26,6 +26,7 @@ Snapshots preserve:
 - Discovered NFT ownership (`nft_tokens`)
 - Optional metadata and bot state
 - Cached position snapshots used by commands and alerts
+- Redemption risk is snapshot-driven via debt-ahead (IR-proxy tiering is retired).
 
 Snapshots are **not** incremental backups.  
 They are intended for **rebuild & restore** workflows.
