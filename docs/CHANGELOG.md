@@ -4,6 +4,13 @@ All notable, user-facing changes are documented here.
 
 ---
 
+## [2026-01-29]
+
+### Changed
+- Redemption-rate change fee now uses the global average rate (and is no longer labeled “estimated”).
+- Redemption tiering is now debt-ahead only (legacy IR-proxy tiers retired).
+- Daily heartbeat no longer lists inactive LP positions.
+
 ## [2026-01-23]
 
 ### Added

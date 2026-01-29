@@ -26,7 +26,7 @@ The `/test-alerts` command modifies **in-memory** offsets to simulate:
 - LP tick shift up/down (percent of position width)
 
 Offsets are not persisted and reset on bot restart.
-When an IR offset is active, redemption state is forced to **ACTIVE** so you can test IR alerts even if CDP is currently **DORMANT**.
+When an IR offset is active, redemption state is forced to **ACTIVE** so you can test IR alerts even if CDP is currently **DORMANT**. IR offsets affect displayed IR values, not debt-ahead tiering.
 
 Subcommands:
 
