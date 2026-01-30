@@ -543,6 +543,12 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
   try { dec1 = await getTokenDecimals(provider, token1); } catch (_) {}
 
   const pairLabel = dbPairLabel || `${token0Symbol}-${token1Symbol}`;
+  const tickToPrice = (tick) => {
+    if (!Number.isFinite(tick)) return null;
+    return Math.pow(1.0001, tick) * Math.pow(10, dec0 - dec1);
+  };
+  const priceLower = tickToPrice(tickLower);
+  const priceUpper = tickToPrice(tickUpper);
 
   if (liquidity === 0n) {
     return {
@@ -576,6 +582,11 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
       lpRangeLabel: "inactive",
       lpPositionFrac: null,
       lpDistanceFrac: null,
+      dec0,
+      dec1,
+      priceLower,
+      priceUpper,
+      currentPrice: null,
     };
   }
 
@@ -610,6 +621,7 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
   } catch (_) {}
 
   const lpClass = classifyLpRangeTier(rangeStatus, tickLower, tickUpper, currentTick);
+  const currentPrice = Number.isFinite(currentTick) ? tickToPrice(currentTick) : null;
 
   // principal token amounts (best-effort)
   let amount0 = null;
@@ -728,6 +740,9 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
     token1Symbol,
     pairLabel,
 
+    dec0,
+    dec1,
+
     fee,
     tickLower,
     tickUpper,
@@ -747,6 +762,10 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
     lpRangeLabel: lpClass.label,
     lpPositionFrac: lpClass.positionFrac,
     lpDistanceFrac: lpClass.distanceFrac,
+
+    priceLower,
+    priceUpper,
+    currentPrice,
   };
 }
 
@@ -1214,12 +1233,32 @@ async function describeLpFromSnapshot(row, snapshot, options = {}) {
     typeof snapshot.currentPrice === "number" && Number.isFinite(snapshot.currentPrice)
       ? snapshot.currentPrice
       : null;
-  if (currentPrice != null && Number.isFinite(baseTick) && Number.isFinite(currentTick)) {
+
+  const dec0 = Number.isFinite(snapshot.dec0) ? Number(snapshot.dec0) : null;
+  const dec1 = Number.isFinite(snapshot.dec1) ? Number(snapshot.dec1) : null;
+  if (currentPrice == null && Number.isFinite(dec0) && Number.isFinite(dec1)) {
+    if (Number.isFinite(currentTick)) {
+      currentPrice = Math.pow(1.0001, currentTick) * Math.pow(10, dec0 - dec1);
+    }
+  } else if (currentPrice != null && Number.isFinite(baseTick) && Number.isFinite(currentTick)) {
     const delta = currentTick - baseTick;
     if (delta !== 0) {
       currentPrice = currentPrice * Math.pow(1.0001, delta);
     }
   }
+
+  const priceLower =
+    typeof snapshot.priceLower === "number" && Number.isFinite(snapshot.priceLower)
+      ? snapshot.priceLower
+      : Number.isFinite(dec0) && Number.isFinite(dec1) && Number.isFinite(tickLower)
+        ? Math.pow(1.0001, tickLower) * Math.pow(10, dec0 - dec1)
+        : null;
+  const priceUpper =
+    typeof snapshot.priceUpper === "number" && Number.isFinite(snapshot.priceUpper)
+      ? snapshot.priceUpper
+      : Number.isFinite(dec0) && Number.isFinite(dec1) && Number.isFinite(tickUpper)
+        ? Math.pow(1.0001, tickUpper) * Math.pow(10, dec0 - dec1)
+        : null;
 
   await handleLpRangeAlert({
     userId,
@@ -1241,8 +1280,8 @@ async function describeLpFromSnapshot(row, snapshot, options = {}) {
     chainId,
     lpStatusOnly,
     pairLabel: snapshot.pairLabel,
-    priceLower: snapshot.priceLower,
-    priceUpper: snapshot.priceUpper,
+    priceLower,
+    priceUpper,
     currentPrice,
     priceBaseSymbol: snapshot.token0Symbol,
     priceQuoteSymbol: snapshot.token1Symbol,
