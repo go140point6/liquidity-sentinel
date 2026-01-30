@@ -6,7 +6,8 @@ const { prepareQueries } = require("../db/queries");
 const { ensureDmOnboarding } = require("../utils/discord/dm");
 const { ephemeralFlags } = require("../utils/discord/ephemerals");
 const {
-  buildFirelightMessage,
+  buildFirelightChannelMessage,
+  buildFirelightDmMessage,
   setFirelightTestState,
   getFirelightTestState,
   updateFirelightMessage,
@@ -31,6 +32,13 @@ module.exports = {
           { name: "unknown", value: "UNKNOWN" },
           { name: "reset", value: "RESET" }
         )
+    )
+    .addNumberOption((o) =>
+      o
+        .setName("amount")
+        .setDescription("Unallocated amount (FXRP) when state=open")
+        .setRequired(false)
+        .setMinValue(0)
     ),
 
   async execute(interaction) {
@@ -44,11 +52,18 @@ module.exports = {
       return;
     }
 
+    const amount = interaction.options.getNumber("amount");
+    if (choice === "OPEN" && (amount == null || !Number.isFinite(amount))) {
+      await interaction.editReply("Amount is required when state=open.");
+      return;
+    }
+
     const nextState = setFirelightTestState(choice);
     const state = nextState || STATE_UNKNOWN;
 
-    const db = getDb();
-    const q = prepareQueries(db);
+  const db = getDb();
+  const q = prepareQueries(db);
+  const { getConfig } = require("../jobs/firelightJob");
 
     const discordId = interaction.user.id;
     const discordName = interaction.user.globalName || interaction.user.username || null;
@@ -57,7 +72,14 @@ module.exports = {
     const userRow = q.selUser.get(userId);
     const acceptsDm = userRow?.accepts_dm ?? 0;
 
-    const { updated } = await updateFirelightMessage(interaction.client, db, { state });
+    const cfg = getConfig(db);
+    const prevState = cfg?.last_state || null;
+    const stateChanged = prevState !== state;
+
+    const { updated } = await updateFirelightMessage(interaction.client, db, {
+      state,
+      capacityRemaining: choice === "OPEN" ? amount : null,
+    });
 
     if (state === STATE_UNKNOWN) {
       await interaction.editReply(
@@ -66,25 +88,32 @@ module.exports = {
       return;
     }
 
-    await ensureDmOnboarding({
-      interaction,
-      userId,
-      discordId,
-      acceptsDm,
-      setUserDmStmt: q.setUserDm,
-    });
+    if (stateChanged) {
+      await ensureDmOnboarding({
+        interaction,
+        userId,
+        discordId,
+        acceptsDm,
+        setUserDmStmt: q.setUserDm,
+      });
 
-    try {
-      await interaction.user.send(buildFirelightMessage(state));
-      await interaction.editReply(
-        `Firelight test sent via DM. Channel message ${updated ? "updated" : "unchanged"}.`
-      );
-    } catch (err) {
-      await interaction.editReply(
-        `Unable to send Firelight test DM (DMs may be closed). Channel message ${
-          updated ? "updated" : "unchanged"
-        }.`
-      );
+      try {
+        await interaction.user.send(buildFirelightDmMessage(state));
+        await interaction.editReply(
+          `Firelight test sent via DM. Channel message ${updated ? "updated" : "unchanged"}.`
+        );
+      } catch (err) {
+        await interaction.editReply(
+          `Unable to send Firelight test DM (DMs may be closed). Channel message ${
+            updated ? "updated" : "unchanged"
+          }.`
+        );
+      }
+      return;
     }
+
+    await interaction.editReply(
+      `Firelight test set to ${state}. Channel message ${updated ? "updated" : "unchanged"}.`
+    );
   },
 };

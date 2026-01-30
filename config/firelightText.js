@@ -2,12 +2,12 @@
 const firelightText = {
   open: [
     "Firelight signal:",
-    "Capacity state: OPEN.",
+    "Capacity state: `OPEN`",
     "Condition is transient.",
   ].join("\n"),
   closed: [
     "Firelight signal:",
-    "Capacity state: CLOSED.",
+    "Capacity state: `CLOSED`",
     "Additional deposits are blocked.",
   ].join("\n"),
   unknown: [

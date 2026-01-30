@@ -53,7 +53,25 @@ function getFirelightTestState() {
   return testOverrideState;
 }
 
-function buildFirelightMessage(state) {
+function buildFirelightChannelMessage(state, { capacityRemaining } = {}) {
+  if (state === STATE_OPEN) {
+    const amt =
+      typeof capacityRemaining === "number" && Number.isFinite(capacityRemaining)
+        ? Math.floor(capacityRemaining)
+        : null;
+    const amtText = amt != null ? amt.toLocaleString("en-US") : "n/a";
+    return [
+      "Firelight signal:",
+      "Capacity state: `OPEN`",
+      `Unallocated amount: \`${amtText} FXRP\``,
+      "Condition is transient.",
+    ].join("\n");
+  }
+  if (state === STATE_CLOSED) return firelightText.closed;
+  return firelightText.unknown;
+}
+
+function buildFirelightDmMessage(state) {
   if (state === STATE_OPEN) return firelightText.open;
   if (state === STATE_CLOSED) return firelightText.closed;
   return firelightText.unknown;
@@ -117,17 +135,21 @@ function setConfig(db, { channelId, messageId }) {
   ).run(channelId, messageId);
 }
 
-function setLastState(db, { state, assets }) {
+function setLastState(db, { state, assets, capacityRemaining }) {
   db.prepare(
     `
       UPDATE firelight_config
-      SET last_state = ?, last_assets = ?, last_checked_at = datetime('now'), updated_at = datetime('now')
+      SET last_state = ?, last_assets = ?, last_capacity = ?, last_checked_at = datetime('now'), updated_at = datetime('now')
       WHERE id = 1
     `
-  ).run(state, assets == null ? null : String(assets));
+  ).run(
+    state,
+    assets == null ? null : String(assets),
+    capacityRemaining == null ? null : String(capacityRemaining)
+  );
 }
 
-async function updateFirelightMessage(client, db, { state }) {
+async function updateFirelightMessage(client, db, { state, capacityRemaining }) {
   const cfg = getConfig(db);
   if (!cfg?.message_id || !cfg?.channel_id) {
     logger.warn("[firelight] Missing firelight_config row; run !!postfirelight");
@@ -146,14 +168,27 @@ async function updateFirelightMessage(client, db, { state }) {
     return { updated: false, previousState: cfg?.last_state || null };
   }
 
-  const content = buildFirelightMessage(state);
+  const roundedCapacity =
+    typeof capacityRemaining === "number" && Number.isFinite(capacityRemaining)
+      ? Math.floor(capacityRemaining)
+      : null;
+  const prevCapacity = cfg?.last_capacity != null ? Number(cfg.last_capacity) : null;
+  const capacityChanged =
+    state === STATE_OPEN &&
+    roundedCapacity != null &&
+    (prevCapacity == null || prevCapacity !== roundedCapacity);
+
+  const content = buildFirelightChannelMessage(state, { capacityRemaining: roundedCapacity });
   const previousState = cfg.last_state || null;
-  if (previousState !== state) {
+  if (previousState !== state || capacityChanged) {
     await message.edit(content);
   }
 
-  setLastState(db, { state });
-  return { updated: previousState !== state, previousState };
+  setLastState(db, { state, capacityRemaining: roundedCapacity });
+  return {
+    updated: previousState !== state || capacityChanged,
+    previousState,
+  };
 }
 
 async function notifySubscribersOnChange(client, db, { prevState, nextState }) {
@@ -172,7 +207,7 @@ async function notifySubscribersOnChange(client, db, { prevState, nextState }) {
     )
     .all();
 
-  const content = buildFirelightMessage(nextState);
+  const content = buildFirelightDmMessage(nextState);
   const setUserDmStmt = db.prepare(
     `UPDATE users SET accepts_dm = ?, updated_at = datetime('now') WHERE id = ?`
   );
@@ -201,7 +236,10 @@ async function runOnce(client) {
   try {
     const res = await readFirelightState();
     state = res.state;
-    const { previousState } = await updateFirelightMessage(client, db, { state });
+    const { previousState } = await updateFirelightMessage(client, db, {
+      state,
+      capacityRemaining: res.capacityRemaining,
+    });
     await notifySubscribersOnChange(client, db, {
       prevState: previousState || null,
       nextState: state,
@@ -241,12 +279,13 @@ function startFirelightJob(client) {
   void wrappedRun();
   cron.schedule(sched, wrappedRun);
 
-  return { setConfig, buildFirelightMessage, readFirelightState };
+  return { setConfig, buildFirelightChannelMessage, buildFirelightDmMessage, readFirelightState };
 }
 
 module.exports = {
   startFirelightJob,
-  buildFirelightMessage,
+  buildFirelightChannelMessage,
+  buildFirelightDmMessage,
   readFirelightState,
   setConfig,
   getConfig,

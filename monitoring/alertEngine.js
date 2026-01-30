@@ -45,15 +45,20 @@ function renderPositionBar(pct) {
   return `0% |${left}o${right}| 100%`;
 }
 
-function formatSnapshotLine(snapshotAt) {
+function formatSnapshotLine(snapshotAt, source) {
   if (!snapshotAt) return null;
   const raw = String(snapshotAt);
   const iso = raw.includes("T") ? raw : raw.replace(" ", "T");
   const tsMs = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
   if (!Number.isFinite(tsMs)) return null;
   const ts = Math.floor(tsMs / 1000);
-  const stale = Date.now() - tsMs > SNAPSHOT_STALE_WARN_MS;
-  const warn = stale ? " ⚠️ Data may be stale." : "";
+  let warn = "";
+  if (String(source || "").toLowerCase() === "rpc") {
+    warn = " ⚠️ RPC fallback used.";
+  } else {
+    const stale = Date.now() - tsMs > SNAPSHOT_STALE_WARN_MS;
+    warn = stale ? " ⚠️ Data may be stale." : "";
+  }
   return `<t:${ts}:f>${warn}`;
 }
 
@@ -328,7 +333,7 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
           inline: false,
         }
       );
-      const snapshotLine = formatSnapshotLine(meta?.snapshotAt);
+      const snapshotLine = formatSnapshotLine(meta?.snapshotAt, meta?.snapshotSource);
       if (snapshotLine) fields.push({ name: "Data captured", value: snapshotLine, inline: false });
       embed.addFields(fields);
 
@@ -409,7 +414,7 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
           inline: false,
         }
       );
-      const snapshotLine = formatSnapshotLine(meta?.snapshotAt);
+    const snapshotLine = formatSnapshotLine(meta?.snapshotAt, meta?.snapshotSource);
       if (snapshotLine) fields.push({ name: "Data captured", value: snapshotLine, inline: false });
       embed.addFields(fields);
 
@@ -458,7 +463,13 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
         }[t] || "⬜");
       const fmtPrice = (v) => {
         if (typeof v !== "number" || !Number.isFinite(v)) return "n/a";
-        return v.toFixed(5);
+        const abs = Math.abs(v);
+        if (abs >= 1) return v.toFixed(5);
+        if (abs === 0) return "0";
+        const log10 = Math.log10(abs);
+        const floor = Math.floor(log10);
+        const decimals = Math.max(0, 3 - 1 - floor);
+        return v.toFixed(decimals);
       };
       const priceLabel =
         meta?.priceBaseSymbol && meta?.priceQuoteSymbol
@@ -514,6 +525,16 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
         ? formatAddressLink(meta.chainId, meta.walletAddress)
         : meta?.wallet || "n/a";
       const statusOnly = meta?.lpStatusOnly === 1 || meta?.lpStatusOnly === true;
+      if (statusOnly) {
+        const statusText =
+          currentStatus === "IN_RANGE"
+            ? { text: "In Range", emoji: "🟢", color: "Green" }
+            : currentStatus === "OUT_OF_RANGE"
+            ? { text: "Out of Range", emoji: "🔴", color: "Red" }
+            : { text: "Updated", emoji: "⚪", color: "Grey" };
+        embed.setTitle(`LP Range Alert - ${statusText.text} ${statusText.emoji}`);
+        embed.setColor(statusText.color);
+      }
       const fields = [
         {
           name: "Position",
@@ -546,7 +567,7 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
               { name: "Meaning", value: meaning, inline: false },
             ])
       );
-      const snapshotLine = formatSnapshotLine(meta?.snapshotAt);
+      const snapshotLine = formatSnapshotLine(meta?.snapshotAt, meta?.snapshotSource);
       if (snapshotLine) fields.push({ name: "Data captured", value: snapshotLine, inline: false });
       embed.addFields(fields);
 
