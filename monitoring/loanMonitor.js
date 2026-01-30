@@ -732,7 +732,7 @@ async function describeLoanPosition(
   const liqClass = classifyLiquidationRisk(bufferFrac);
 
   const debtSnap = getDebtAheadSnapshot({ userId, walletId, contractId, troveId });
-  const snapshotAt = debtSnap?.snapshotAt || null;
+  const snapshotAt = new Date().toISOString();
 
   // Liquidation alert (DB-stable identity)
   const liqTierFinal = liqClass.tier;
@@ -758,6 +758,7 @@ async function describeLoanPosition(
     liquidationBufferFrac: bufferFrac,
     status: statusStr,
     snapshotAt,
+    snapshotSource: "rpc",
   });
 
   // Redemption alert no longer gated by CDP active state
@@ -821,6 +822,7 @@ async function describeLoanPosition(
     loanIR,
     globalIR,
     snapshotAt,
+    snapshotSource: "rpc",
     isCDPActive: cdpIsActive,
     status: statusStr,
   });
@@ -899,6 +901,7 @@ async function describeLoanFromSnapshot(row, snapshot, { cdpState } = {}) {
     liquidationBufferFrac: bufferFrac,
     status: statusStr,
     snapshotAt,
+    snapshotSource: "snapshot",
   });
 
   let debtAheadPct =
@@ -960,6 +963,7 @@ async function describeLoanFromSnapshot(row, snapshot, { cdpState } = {}) {
     loanIR,
     globalIR,
     snapshotAt,
+    snapshotSource: "snapshot",
     isCDPActive: cdpIsActive,
     status: statusStr,
   });

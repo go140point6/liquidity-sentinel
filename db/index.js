@@ -151,6 +151,7 @@ function initSchema(db) {
     message_id     TEXT NOT NULL,
     last_state     TEXT,
     last_assets    TEXT,
+    last_capacity  TEXT,
     last_checked_at TEXT,
     created_at     TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
@@ -369,6 +370,8 @@ function initSchema(db) {
     "lp_alerts_status_only",
     "INTEGER NOT NULL DEFAULT 0 CHECK (lp_alerts_status_only IN (0,1))"
   );
+
+  ensureColumn("firelight_config", "last_capacity", "TEXT");
 
   if (alertTypeAdded) {
     const rows = db

@@ -11,6 +11,12 @@ All notable, user-facing changes are documented here.
 - Redemption tiering is now debt-ahead only (legacy IR-proxy tiers retired).
 - Daily heartbeat no longer lists inactive LP positions.
 
+## [2026-01-30]
+
+### Changed
+- Daily heartbeat will refresh snapshots when stale; if refresh fails, it sends the most recent stale data with a warning.
+- Firelight channel updates now include capacity changes while OPEN, without spamming DMs.
+
 ## [2026-01-23]
 
 ### Added

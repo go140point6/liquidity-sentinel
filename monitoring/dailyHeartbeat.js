@@ -1,7 +1,7 @@
 // monitoring/dailyHeartbeat.js
 const { EmbedBuilder } = require("discord.js");
-const { getLoanSummaries } = require("./loanMonitor");
-const { getLpSummaries } = require("./lpMonitor");
+const { getLoanSummaries, refreshLoanSnapshots } = require("./loanMonitor");
+const { getLpSummaries, refreshLpSnapshots } = require("./lpMonitor");
 const { createDecimalFormatter } = require("../utils/intlNumberFormats");
 const { getDb } = require("../db");
 const logger = require("../utils/logger");
@@ -463,6 +463,34 @@ async function sendDailyHeartbeat(client) {
   } catch (err) {
     logger.error("[Heartbeat] Failed to fetch summaries:", err?.message || err);
     return;
+  }
+
+  const latestSnapshotTs = []
+    .concat(allLoanSummaries || [])
+    .concat(allLpSummaries || [])
+    .map((s) => parseSnapshotTs(s?.snapshotAt))
+    .filter((v) => v != null)
+    .reduce((max, v) => (v > max ? v : max), 0);
+  const latestSnapshotMs = latestSnapshotTs ? latestSnapshotTs * 1000 : 0;
+  const isStale = !latestSnapshotMs || Date.now() - latestSnapshotMs > SNAPSHOT_STALE_WARN_MS;
+
+  if (isStale) {
+    logger.warn("[Heartbeat] Snapshot data stale; refreshing before send.");
+    try {
+      await refreshLoanSnapshots();
+    } catch (err) {
+      logger.warn("[Heartbeat] Loan snapshot refresh failed:", err?.message || err);
+    }
+    try {
+      await refreshLpSnapshots();
+    } catch (err) {
+      logger.warn("[Heartbeat] LP snapshot refresh failed:", err?.message || err);
+    }
+    try {
+      [allLoanSummaries, allLpSummaries] = await Promise.all([getLoanSummaries(), getLpSummaries()]);
+    } catch (err) {
+      logger.error("[Heartbeat] Failed to re-fetch summaries; using stale data:", err?.message || err);
+    }
   }
 
   const nowIso = new Date().toISOString();

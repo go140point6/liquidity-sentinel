@@ -871,7 +871,7 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
     lpStatusOnly,
   } = row;
   const prevStatus = extractPrevRangeStatus(prevStateJson);
-  const snapshotAt = getLpSnapshotAt({ userId, walletId, contractId, tokenId });
+  const snapshotAt = new Date().toISOString();
 
   const tokenIdBN = BigInt(tokenId);
   const pm = new ethers.Contract(contract, positionManagerAbi, provider);
@@ -934,13 +934,14 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
       chainId,
       lpStatusOnly,
       pairLabel: pairLabelFallback,
-      priceLower: null,
-      priceUpper: null,
-      currentPrice: null,
-      priceBaseSymbol: sym0,
-      priceQuoteSymbol: sym1,
-      snapshotAt,
-    });
+    priceLower: null,
+    priceUpper: null,
+    currentPrice: null,
+    priceBaseSymbol: sym0,
+    priceQuoteSymbol: sym1,
+    snapshotAt,
+    snapshotSource: "rpc",
+  });
     return;
   }
 
@@ -1132,6 +1133,7 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
     priceBaseSymbol: sym0,
     priceQuoteSymbol: sym1,
     snapshotAt,
+    snapshotSource: "rpc",
   });
 
   if (verbose) {
@@ -1217,13 +1219,14 @@ async function describeLpFromSnapshot(row, snapshot, options = {}) {
       chainId,
       lpStatusOnly,
       pairLabel: snapshot.pairLabel,
-      priceLower: null,
-      priceUpper: null,
-      currentPrice: null,
-      priceBaseSymbol: snapshot.token0Symbol,
-      priceQuoteSymbol: snapshot.token1Symbol,
-      snapshotAt,
-    });
+    priceLower: null,
+    priceUpper: null,
+    currentPrice: null,
+    priceBaseSymbol: snapshot.token0Symbol,
+    priceQuoteSymbol: snapshot.token1Symbol,
+    snapshotAt,
+    snapshotSource: "snapshot",
+  });
     return;
   }
 
@@ -1286,6 +1289,7 @@ async function describeLpFromSnapshot(row, snapshot, options = {}) {
     priceBaseSymbol: snapshot.token0Symbol,
     priceQuoteSymbol: snapshot.token1Symbol,
     snapshotAt,
+    snapshotSource: "snapshot",
   });
 
   if (verbose) {
@@ -1306,6 +1310,10 @@ async function monitorLPs(options = {}) {
 
   logger.debug("");
 
+  let totalCount = 0;
+  let snapshotCount = 0;
+  let rpcCount = 0;
+
   const rows = getMonitoredLpRows();
   if (!rows || rows.length === 0) {
     logger.info("[LP] No enabled LP positions found in DB.");
@@ -1323,6 +1331,7 @@ async function monitorLPs(options = {}) {
     let provider = null;
 
     for (const row of chainRows) {
+      totalCount += 1;
       const snap = getLpSnapshot({
         userId: row.userId,
         walletId: row.walletId,
@@ -1332,10 +1341,7 @@ async function monitorLPs(options = {}) {
 
       const snapshotFresh = isSnapshotFresh(snap?.snapshotAt);
       if (snapshotFresh) {
-        logger.debug(
-          `[LP] tokenId=${row.tokenId} ${row.protocol || "UNKNOWN_PROTOCOL"} ` +
-            `${row.chainId || chainId} using snapshot`
-        );
+        snapshotCount += 1;
         try {
           await describeLpFromSnapshot(row, snap, { verbose });
         } catch (err) {
@@ -1347,10 +1353,7 @@ async function monitorLPs(options = {}) {
         continue;
       }
 
-      logger.debug(
-        `[LP] tokenId=${row.tokenId} ${row.protocol || "UNKNOWN_PROTOCOL"} ` +
-          `${row.chainId || chainId} using RPC fallback`
-      );
+      rpcCount += 1;
       if (!provider) {
         try {
           provider = getProviderForChain(chainId, CHAINS_CONFIG);
@@ -1374,6 +1377,9 @@ async function monitorLPs(options = {}) {
   }
 
   logRunApplied();
+  logger.debug(
+    `[LP] monitor summary: total=${totalCount} snapshot=${snapshotCount} rpc=${rpcCount}`
+  );
 }
 
 module.exports = {

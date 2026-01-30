@@ -251,6 +251,7 @@ CREATE TABLE firelight_config (
   message_id     TEXT NOT NULL,
   last_state     TEXT,
   last_assets    TEXT,
+  last_capacity  TEXT,
   last_checked_at TEXT,
   created_at     TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
