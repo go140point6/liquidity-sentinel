@@ -227,6 +227,16 @@ CREATE TABLE global_params (
   FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE CASCADE
 );
 
+CREATE TABLE price_cache (
+  chain_id    TEXT NOT NULL,
+  symbol      TEXT NOT NULL,
+  price_usd   REAL NOT NULL,
+  source      TEXT,
+  fetched_at  TEXT NOT NULL DEFAULT (datetime('now')),
+
+  PRIMARY KEY (chain_id, symbol)
+);
+
 -- =========================================================
 -- USERS
 -- =========================================================

@@ -11,6 +11,21 @@ All notable, user-facing changes are documented here.
 - Redemption tiering is now debt-ahead only (legacy IR-proxy tiers retired).
 - Daily heartbeat no longer lists inactive LP positions.
 
+## [2026-02-02]
+
+### Added
+- `/stats` for public system snapshot totals (users, wallets, active loans/LPs, loan debt, Firelight subscribers).
+
+## [2026-02-03]
+
+### Added
+- LP USD pricing cache from Liquity JSON (FLR/XRP/CDP/APS) and CryptoCompare (XDC), with TVL coverage in `/stats`.
+
+### Changed
+- `/stats` now includes LP USD TVL and coverage, plus user chain breakdown.
+- `/my-lp` and Daily Heartbeat LP sections now show USD values for principal and fees with consistent decimals and small-value precision.
+- Daily heartbeat loan section formatting adjusted (tier colors moved to risk lines, collateral line removed).
+
 ## [2026-01-30]
 
 ### Changed

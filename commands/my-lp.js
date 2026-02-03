@@ -32,13 +32,26 @@ const { applyLpTickShift, getTestOffsets } = require("../monitoring/testOffsets"
 const { formatLpPositionLink, formatAddressLink } = require("../utils/links");
 const { shortenTroveId } = require("../utils/ethers/shortenTroveId");
 const { shortenAddress } = require("../utils/ethers/shortenAddress");
+const { loadPriceCache, isStableUsd, normalizeSymbol } = require("../utils/priceCache");
 
-// 4 decimals, thousands separators
-const fmt4 = createDecimalFormatter(0, 4);
+// 1 decimal for token amounts >= 1, 3 sig-digits for < 1
+const fmt4 = createDecimalFormatter(0, 1);
+const fmt2 = createDecimalFormatter(2, 2);
 
 function fmtNum(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return null;
-  return fmt4.format(n);
+  const abs = Math.abs(n);
+  if (abs >= 1) return fmt4.format(n);
+  // 3 significant digits for small values
+  const decimals = Math.max(0, 3 - Math.floor(Math.log10(abs || 1)) - 1);
+  const fmtSig = createDecimalFormatter(0, decimals);
+  return fmtSig.format(n);
+}
+
+function fmtUsd(n) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return null;
+  if (n === 0) return "$0";
+  return `$${fmt2.format(n)}`;
 }
 
 module.exports = {
@@ -109,6 +122,8 @@ module.exports = {
           return out;
         });
 
+      const priceCache = loadPriceCache(db);
+
       displaySummaries.sort((a, b) => {
         const rangeOrder = { OUT_OF_RANGE: 0, UNKNOWN: 1, IN_RANGE: 2 };
         const tierOrder = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, UNKNOWN: 4 };
@@ -164,6 +179,27 @@ module.exports = {
 
         const sym0 = s.token0Symbol || s.token0 || "?";
         const sym1 = s.token1Symbol || s.token1 || "?";
+        const baseSym = normalizeSymbol(s.priceBaseSymbol || sym0);
+        const quoteSym = normalizeSymbol(s.priceQuoteSymbol || sym1);
+        const priceMap = priceCache.get(String(s.chainId || "").toUpperCase());
+        let priceBase = Number(priceMap?.get(baseSym));
+        let priceQuote = Number(priceMap?.get(quoteSym));
+        const price = Number(s.currentPrice);
+
+        if (!Number.isFinite(priceBase) && isStableUsd(s.chainId, baseSym)) priceBase = 1;
+        if (!Number.isFinite(priceQuote) && isStableUsd(s.chainId, quoteSym)) priceQuote = 1;
+
+        if (!Number.isFinite(priceBase) && Number.isFinite(priceQuote) && Number.isFinite(price) && price > 0) {
+          // price = quote per base
+          priceBase = priceQuote * price;
+        } else if (
+          !Number.isFinite(priceQuote) &&
+          Number.isFinite(priceBase) &&
+          Number.isFinite(price) &&
+          price > 0
+        ) {
+          priceQuote = priceBase / price;
+        }
 
         if (s.pairLabel) valueLines.push(`Pair: **${s.pairLabel}**`);
         else if (sym0 && sym1) valueLines.push(`Pair: **${sym0} - ${sym1}**`);
@@ -176,20 +212,32 @@ module.exports = {
         // ---- NEW: principal amounts
         const a0 = fmtNum(s.amount0, 6);
         const a1 = fmtNum(s.amount1, 6);
+        const usd0 =
+          Number.isFinite(s.amount0) && Number.isFinite(priceBase)
+            ? fmtUsd(s.amount0 * priceBase)
+            : null;
+        const usd1 =
+          Number.isFinite(s.amount1) && Number.isFinite(priceQuote)
+            ? fmtUsd(s.amount1 * priceQuote)
+            : null;
         if (a0 != null || a1 != null) {
           const p = [];
-          if (a0 != null) p.push(`**${a0} ${sym0}**`);
-          if (a1 != null) p.push(`**${a1} ${sym1}**`);
+          if (a0 != null) p.push(`**${a0} ${sym0}**${usd0 ? ` (${usd0})` : ""}`);
+          if (a1 != null) p.push(`**${a1} ${sym1}**${usd1 ? ` (${usd1})` : ""}`);
           valueLines.push(`Principal: ${p.join(" + ")}`);
         }
 
         // ---- NEW: uncollected fees
         const f0 = fmtNum(s.fees0, 6);
         const f1 = fmtNum(s.fees1, 6);
+        const f0Usd =
+          Number.isFinite(s.fees0) && Number.isFinite(priceBase) ? fmtUsd(s.fees0 * priceBase) : null;
+        const f1Usd =
+          Number.isFinite(s.fees1) && Number.isFinite(priceQuote) ? fmtUsd(s.fees1 * priceQuote) : null;
         if (f0 != null || f1 != null) {
           const p = [];
-          if (f0 != null) p.push(`**${f0} ${sym0}**`);
-          if (f1 != null) p.push(`**${f1} ${sym1}**`);
+          if (f0 != null) p.push(`**${f0} ${sym0}**${f0Usd ? ` (${f0Usd})` : ""}`);
+          if (f1 != null) p.push(`**${f1} ${sym1}**${f1Usd ? ` (${f1Usd})` : ""}`);
           valueLines.push(`Uncollected fees: ${p.join(" + ")}`);
         }
 

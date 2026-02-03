@@ -16,6 +16,7 @@ const logger = baseLogger.forEnv("SCAN_DEBUG"); // required in .env (fail-fast)
 const { acquireLock, releaseLock } = require("../utils/lock");
 const { refreshLoanSnapshots } = require("../monitoring/loanMonitor");
 const { refreshLpSnapshots } = require("../monitoring/lpMonitor");
+const { buildSymbolsFromLpSnapshots, refreshPriceCache } = require("../utils/priceCache");
 const { initSchema } = require("../db");
 const troveNftAbi = require("../abi/troveNFT.json");
 const troveManagerAbi = require("../abi/troveManager.json");
@@ -1004,6 +1005,13 @@ async function main() {
         );
       }
       await refreshLpSnapshots();
+    }
+
+    try {
+      const symbolsByChain = buildSymbolsFromLpSnapshots(db);
+      await refreshPriceCache(db, symbolsByChain);
+    } catch (err) {
+      logger.warn(`[scanLoanLpPositions] price cache refresh failed: ${err.message || err}`);
     }
 
     log("[scanLoanLpPositions] Refreshing redemption-rate snapshots...");
