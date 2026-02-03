@@ -93,8 +93,7 @@ module.exports = {
 
   async execute(interaction) {
     try {
-      const ephFlags = ephemeralFlags();
-      await interaction.deferReply({ flags: ephFlags });
+      await interaction.deferReply({ flags: 0 });
 
       const db = getDb();
 
@@ -210,7 +209,7 @@ module.exports = {
       if (pricedDetails.length) {
         const top = [...pricedDetails]
           .sort((a, b) => b.tvl - a.tvl)
-          .slice(0, 10);
+          .slice(0, 50);
         for (const p of top) {
           logger.debug(
             `[stats] LP TVL ${p.chainId} ${p.protocol} token=${p.tokenId} ` +
@@ -252,17 +251,17 @@ module.exports = {
           { name: "Active LPs", value: fmt0.format(activeLpCount), inline: true },
           { name: "\u200b", value: "\u200b", inline: true },
           {
-            name: "Flare only",
+            name: "Flare users only",
             value: `${fmt0.format(flareOnly)} (${fmt0.format(flarePct)}%)`,
             inline: true,
           },
           {
-            name: "XDC Network only",
+            name: "XDC Network users only",
             value: `${fmt0.format(xdcOnly)} (${fmt0.format(xdcPct)}%)`,
             inline: true,
           },
           {
-            name: "Multi-chain",
+            name: "Multi-chain users",
             value: `${fmt0.format(multiChain)} (${fmt0.format(multiPct)}%)`,
             inline: true,
           },
