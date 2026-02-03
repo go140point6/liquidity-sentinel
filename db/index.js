@@ -136,6 +136,15 @@ function initSchema(db) {
     FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS price_cache (
+    chain_id    TEXT NOT NULL,
+    symbol      TEXT NOT NULL,
+    price_usd   REAL NOT NULL,
+    source      TEXT,
+    fetched_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (chain_id, symbol)
+  );
+
   CREATE TABLE IF NOT EXISTS users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     discord_id    TEXT NOT NULL UNIQUE,

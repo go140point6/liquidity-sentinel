@@ -8,6 +8,7 @@ const logger = require("../utils/logger");
 const { shortenTroveId } = require("../utils/ethers/shortenTroveId");
 const { shortenAddress } = require("../utils/ethers/shortenAddress");
 const { formatLoanTroveLink, formatLpPositionLink, formatAddressLink } = require("../utils/links");
+const { loadPriceCache, isStableUsd, normalizeSymbol } = require("../utils/priceCache");
 
 function requireNumberEnv(name) {
   const raw = process.env[name];
@@ -31,14 +32,17 @@ function chunk(arr, size) {
   return out;
 }
 
-const fmt2 = createDecimalFormatter(0, 2); // commas + up to 2 decimals
-const fmt4 = createDecimalFormatter(0, 4); // commas + up to 4 decimals
+const fmt2 = createDecimalFormatter(2, 2); // commas + exactly 2 decimals
+const fmt4 = createDecimalFormatter(0, 1); // commas + up to 1 decimal
 const fmt5 = createDecimalFormatter(0, 5); // commas + up to 5 decimals
 const fmt6 = createDecimalFormatter(0, 6); // commas + up to 6 decimals
+const fmtWhole = createDecimalFormatter(0, 0);
+const fmtDebt = createDecimalFormatter(2, 2);
 
-function fmtNum4(n) {
+function fmtUsd(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return "n/a";
-  return fmt4.format(n);
+  if (n === 0) return "$0";
+  return `$${fmt2.format(n)}`;
 }
 
 function fmtNum5(n) {
@@ -60,10 +64,11 @@ function formatTokenAmount(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return "n/a";
   const abs = Math.abs(n);
   if (abs === 0) return "0";
-  if (abs >= 1000) return fmt2.format(n);
   if (abs >= 1) return fmt4.format(n);
-  if (abs >= 0.01) return fmt6.format(n);
-  return n.toPrecision(6);
+  // 3 significant digits for small values
+  const decimals = Math.max(0, 3 - Math.floor(Math.log10(abs || 1)) - 1);
+  const fmtSig = createDecimalFormatter(0, decimals);
+  return fmtSig.format(n);
 }
 
 function parseSnapshotTs(raw) {
@@ -96,20 +101,11 @@ function loanMeaning(tier, kind, aheadPctText) {
   return `${label[0].toUpperCase()}${label.slice(1)} risk is unknown.`;
 }
 
-function formatLoanField(s) {
+function formatLoanField(s, priceCache) {
   const rawId = s.troveId ?? s.tokenId ?? s.positionId ?? "?";
   const troveId = shortenTroveId(rawId);
-  const tier = (s.liquidationTier || "UNKNOWN").toString().toUpperCase();
-  const tierEmoji = {
-    CRITICAL: "🟥",
-    HIGH: "🟧",
-    MEDIUM: "🟨",
-    LOW: "🟩",
-    UNKNOWN: "⬜",
-  }[tier] || "⬜";
-
   const troveLink = formatLoanTroveLink(s.protocol, rawId, troveId);
-  const title = `${tierEmoji} ${s.protocol || "UNKNOWN"} (${s.chainId || "?"})`;
+  const title = `${s.protocol || "UNKNOWN"} (${s.chainId || "?"})`;
   const lines = [];
   lines.push(`Trove: ${troveLink}`);
   if (s.owner) {
@@ -120,32 +116,56 @@ function formatLoanField(s) {
   const status = s.status || "UNKNOWN";
   lines.push(`Status: ${status}`);
   const debtText =
-    typeof s.debtAmount === "number" && Number.isFinite(s.debtAmount) ? fmtNum4(s.debtAmount) : "n/a";
+    typeof s.debtAmount === "number" && Number.isFinite(s.debtAmount) ? fmtDebt.format(s.debtAmount) : "n/a";
   lines.push(`Debt: ${debtText}`);
   lines.push("");
 
   if (s.hasPrice && typeof s.price === "number" && typeof s.liquidationPrice === "number") {
+    const liqTier = (s.liquidationTier || "UNKNOWN").toString().toUpperCase();
+    const liqEmoji = {
+      CRITICAL: "🟥",
+      HIGH: "🟧",
+      MEDIUM: "🟨",
+      LOW: "🟩",
+      UNKNOWN: "⬜",
+    }[liqTier] || "⬜";
     const ltvText = fmtPct2(s.ltvPct);
     const bufferText =
       typeof s.liquidationBufferFrac === "number"
         ? `${(s.liquidationBufferFrac * 100).toFixed(2)}%`
         : "n/a";
-    lines.push("Liquidation risk:");
+    lines.push(`${liqEmoji} Liquidation risk:`);
     lines.push(
       `LTV: ${ltvText} | Price: ${fmtNum5(s.price)} | Liq: ${fmtNum5(
         s.liquidationPrice
-      )} | Buffer: ${bufferText} (${tier})`
+      )} | Buffer: ${bufferText} (${liqTier})`
     );
     lines.push(`Meaning: ${loanMeaning(s.liquidationTier, "LIQUIDATION")}`);
     lines.push("");
   } else {
-    lines.push("Liquidation risk:");
+    const liqTier = (s.liquidationTier || "UNKNOWN").toString().toUpperCase();
+    const liqEmoji = {
+      CRITICAL: "🟥",
+      HIGH: "🟧",
+      MEDIUM: "🟨",
+      LOW: "🟩",
+      UNKNOWN: "⬜",
+    }[liqTier] || "⬜";
+    lines.push(`${liqEmoji} Liquidation risk:`);
     lines.push("Price / liq: *(unavailable)*");
     lines.push(`Meaning: ${loanMeaning(s.liquidationTier, "LIQUIDATION")}`);
     lines.push("");
   }
 
   if (typeof s.interestPct === "number") {
+    const redTier = (s.redemptionTier || "UNKNOWN").toString().toUpperCase();
+    const redEmoji = {
+      CRITICAL: "🟥",
+      HIGH: "🟧",
+      MEDIUM: "🟨",
+      LOW: "🟩",
+      UNKNOWN: "⬜",
+    }[redTier] || "⬜";
     const deltaIr =
       typeof s.globalIrPct === "number" && Number.isFinite(s.globalIrPct)
         ? s.interestPct - s.globalIrPct
@@ -154,7 +174,7 @@ function formatLoanField(s) {
       deltaIr == null || !Number.isFinite(deltaIr)
         ? "Δ n/a"
         : `Δ ${deltaIr >= 0 ? "+" : ""}${deltaIr.toFixed(2)} pp`;
-    lines.push("Redemption risk:");
+    lines.push(`${redEmoji} Redemption risk:`);
     lines.push(
       `IR: ${s.interestPct.toFixed(2)}% | Global: ${
         typeof s.globalIrPct === "number" ? s.globalIrPct.toFixed(2) : "n/a"
@@ -175,7 +195,7 @@ function formatLoanField(s) {
   return { name: title, value: lines.join("\n") };
 }
 
-function formatLpField(s) {
+function formatLpField(s, priceCache) {
   const tokenId = s.tokenId ?? s.positionId ?? "?";
   const tokenLink = formatLpPositionLink(s.protocol, tokenId, shortenTroveId(tokenId));
   const pair =
@@ -198,6 +218,28 @@ function formatLpField(s) {
     parts.push(`Wallet: ${walletText}`);
   }
 
+  const chainId = String(s.chainId || "").toUpperCase();
+  const priceMap = priceCache?.get(chainId);
+  const baseSym = normalizeSymbol(s.priceBaseSymbol || s.token0Symbol || s.token0);
+  const quoteSym = normalizeSymbol(s.priceQuoteSymbol || s.token1Symbol || s.token1);
+  let priceBase = Number(priceMap?.get(baseSym));
+  let priceQuote = Number(priceMap?.get(quoteSym));
+  const price = Number(s.currentPrice);
+
+  if (!Number.isFinite(priceBase) && isStableUsd(chainId, baseSym)) priceBase = 1;
+  if (!Number.isFinite(priceQuote) && isStableUsd(chainId, quoteSym)) priceQuote = 1;
+
+  if (!Number.isFinite(priceBase) && Number.isFinite(priceQuote) && Number.isFinite(price) && price > 0) {
+    priceBase = priceQuote * price;
+  } else if (
+    !Number.isFinite(priceQuote) &&
+    Number.isFinite(priceBase) &&
+    Number.isFinite(price) &&
+    price > 0
+  ) {
+    priceQuote = priceBase / price;
+  }
+
   const hasAmounts =
     typeof s.amount0 === "number" &&
     Number.isFinite(s.amount0) &&
@@ -207,8 +249,17 @@ function formatLpField(s) {
   if (hasAmounts) {
     const sym0 = s.token0Symbol || "token0";
     const sym1 = s.token1Symbol || "token1";
+    const usd0 =
+      Number.isFinite(s.amount0) && Number.isFinite(priceBase)
+        ? fmtUsd(s.amount0 * priceBase)
+        : null;
+    const usd1 =
+      Number.isFinite(s.amount1) && Number.isFinite(priceQuote)
+        ? fmtUsd(s.amount1 * priceQuote)
+        : null;
     parts.push(
-      `Principal: ${sym0} ${formatTokenAmount(s.amount0)}, ${sym1} ${formatTokenAmount(s.amount1)}`
+      `Principal: ${formatTokenAmount(s.amount0)} ${sym0}${usd0 ? ` (${usd0})` : ""}, ` +
+        `${formatTokenAmount(s.amount1)} ${sym1}${usd1 ? ` (${usd1})` : ""}`
     );
   } else if (s.liquidity) {
     parts.push(`Principal: ${s.liquidity}`);
@@ -222,8 +273,13 @@ function formatLpField(s) {
   ) {
     const sym0 = s.token0Symbol || "token0";
     const sym1 = s.token1Symbol || "token1";
+    const f0Usd =
+      Number.isFinite(s.fees0) && Number.isFinite(priceBase) ? fmtUsd(s.fees0 * priceBase) : null;
+    const f1Usd =
+      Number.isFinite(s.fees1) && Number.isFinite(priceQuote) ? fmtUsd(s.fees1 * priceQuote) : null;
     parts.push(
-      `Uncollected fees: ${sym0} ${formatTokenAmount(s.fees0)}, ${sym1} ${formatTokenAmount(s.fees1)}`
+      `Uncollected fees: ${formatTokenAmount(s.fees0)} ${sym0}${f0Usd ? ` (${f0Usd})` : ""}, ` +
+        `${formatTokenAmount(s.fees1)} ${sym1}${f1Usd ? ` (${f1Usd})` : ""}`
     );
   }
 
@@ -283,7 +339,7 @@ function colorForLpStatus(status) {
   );
 }
 
-function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client }) {
+function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, priceCache }) {
   const embeds = [];
   const activeLoanSummaries = (loanSummaries || []).filter(
     (s) => String(s.status || "").toUpperCase() !== "CLOSED"
@@ -323,7 +379,7 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client }) {
       const bv = typeof b.ltvPct === "number" ? b.ltvPct : -1;
       return bv - av;
     })
-    .map(formatLoanField);
+    .map((s) => formatLoanField(s, priceCache));
 
   if (!loanFields.length) {
     embeds.push(
@@ -364,7 +420,7 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client }) {
       if (ra !== rb) return ra - rb;
       return (a.protocol || "").localeCompare(b.protocol || "");
     })
-    .map(formatLpField);
+    .map((s) => formatLpField(s, priceCache));
 
   if (!lpFields.length) {
     embeds.push(
@@ -504,11 +560,13 @@ async function sendDailyHeartbeat(client) {
     const userLoans = (allLoanSummaries || []).filter((s) => String(s.userId) === userIdKey);
     const userLps = (allLpSummaries || []).filter((s) => String(s.userId) === userIdKey);
 
-    const embeds = buildHeartbeatEmbeds({
+  const priceCache = loadPriceCache(getDb());
+  const embeds = buildHeartbeatEmbeds({
       nowIso,
       loanSummaries: userLoans,
       lpSummaries: userLps,
       client,
+      priceCache,
     });
 
     try {

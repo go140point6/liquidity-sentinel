@@ -7,6 +7,7 @@ const { ensureDmOnboarding } = require("../utils/discord/dm");
 const { ephemeralFlags } = require("../utils/discord/ephemerals");
 const { createDecimalFormatter } = require("../utils/intlNumberFormats");
 const { formatLoanTroveLink, formatAddressLink } = require("../utils/links");
+const { loadPriceCache, isStableUsd, normalizeSymbol } = require("../utils/priceCache");
 const logger = require("../utils/logger");
 const { getTestOffsets, getDebtAheadOffsetPpForProtocol } = require("../monitoring/testOffsets");
 const { shortenAddress } = require("../utils/ethers/shortenAddress");
@@ -37,6 +38,9 @@ function chunk(arr, size) {
 const fmt2 = createDecimalFormatter(0, 2);
 const fmt4 = createDecimalFormatter(0, 4);
 const fmt5 = createDecimalFormatter(0, 5);
+const fmtWhole = createDecimalFormatter(0, 0);
+const fmtDebt = createDecimalFormatter(2, 2);
+const fmtUsd2 = createDecimalFormatter(2, 2);
 
 function fmtNum(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return "n/a";
@@ -51,6 +55,12 @@ function fmtNum2(n) {
 function fmtNum5(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return "n/a";
   return fmt5.format(n);
+}
+
+function fmtUsd(n) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return "n/a";
+  if (n === 0) return "$0";
+  return `$${fmtUsd2.format(n)}`;
 }
 
 function shortId(id, head = 4, tail = 4) {
@@ -136,6 +146,7 @@ module.exports = {
       const { getLoanSummaries, getCdpPrice, classifyCdpRedemptionState } = require("../monitoring/loanMonitor");
 
       const summaries = await getLoanSummaries(userId);
+      const priceCache = loadPriceCache(db);
 
       if (!summaries.length) {
         await interaction.editReply("No loan positions are currently being monitored for you.");
@@ -240,14 +251,23 @@ module.exports = {
         }
 
         if (typeof s.collAmount === "number") {
-          valueLines.push(`Collateral: **${fmtNum(s.collAmount)} ${s.collSymbol || ""}**`.trim());
+          const chainId = String(s.chainId || "").toUpperCase();
+          const priceMap = priceCache.get(chainId);
+          const sym = normalizeSymbol(s.collSymbol);
+          let priceUsd = Number(priceMap?.get(sym));
+          if (!Number.isFinite(priceUsd) && isStableUsd(chainId, sym)) priceUsd = 1;
+          const usdText =
+            Number.isFinite(priceUsd) ? ` (${fmtUsd(s.collAmount * priceUsd)})` : "";
+          valueLines.push(
+            `Collateral: **${fmtWhole.format(s.collAmount)} ${s.collSymbol || ""}**${usdText}`.trim()
+          );
         }
         if (typeof s.debtAmount === "number") {
-          valueLines.push(`Debt: **${fmtNum(s.debtAmount)}**`);
+          valueLines.push(`Debt: **${fmtDebt.format(s.debtAmount)}**`);
         }
 
         if (typeof s.interestPct === "number") {
-          let irLine = `IR: **${s.interestPct.toFixed(2)}% p.a.**`;
+          let irLine = `IR: **${s.interestPct.toFixed(2)}%**`;
           if (typeof s.globalIrPct === "number") {
             irLine += ` vs global **${s.globalIrPct.toFixed(2)}%**`;
           }
