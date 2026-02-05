@@ -513,9 +513,18 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
           : headline.text === "Worsening"
           ? "Red"
           : "Grey";
+
+      const statusShort =
+        currentStatus === "IN_RANGE"
+          ? { text: "IR", emoji: "🟢" }
+          : currentStatus === "OUT_OF_RANGE"
+          ? { text: "OOR", emoji: "🔴" }
+          : { text: "UNK", emoji: "⚪" };
+      const tierU = (newTier || "UNKNOWN").toString().toUpperCase();
+
       const embed = new EmbedBuilder()
-        .setTitle(`LP Range Alert - ${headline.text} ${headline.emoji}`)
-        .setDescription(message)
+        .setTitle(`LP Alert - ${statusShort.emoji} ${statusShort.text} ${tierEmoji(tierU)} ${tierU}`)
+        .setDescription(`${meta?.protocol || "LP"} (${headline.text.toLowerCase()})`)
         .setColor(alertColor)
         .setTimestamp();
 

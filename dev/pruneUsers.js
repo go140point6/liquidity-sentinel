@@ -12,6 +12,8 @@ const { openDb, dbFile } = require("../db");
 
 const KEEP_USER_ID = 1;
 const KEEP_DISCORD_ID = "567425551229386758";
+const FIRELIGHT_CHANNEL_ID = process.env.FIRELIGHT_CHANNEL_ID;
+const FIRELIGHT_MESSAGE_ID = "1465197144343449611";
 
 const db = openDb({ fileMustExist: true });
 
@@ -39,13 +41,22 @@ try {
     .prepare("SELECT COUNT(*) AS cnt FROM users WHERE id <> ?")
     .get(KEEP_USER_ID).cnt;
 
-  if (countToDelete === 0) {
-    logger.info(`No users to delete. users total=${countAll}.`);
-    process.exit(0);
-  }
-
   const tx = db.transaction(() => {
-    db.prepare("DELETE FROM users WHERE id <> ?").run(KEEP_USER_ID);
+    if (countToDelete > 0) {
+      db.prepare("DELETE FROM users WHERE id <> ?").run(KEEP_USER_ID);
+    }
+
+    if (FIRELIGHT_CHANNEL_ID) {
+      db.prepare(
+        `
+        INSERT INTO firelight_config (id, channel_id, message_id)
+        VALUES (1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          channel_id = excluded.channel_id,
+          message_id = excluded.message_id
+      `
+      ).run(String(FIRELIGHT_CHANNEL_ID), String(FIRELIGHT_MESSAGE_ID));
+    }
   });
   tx();
 
@@ -53,6 +64,13 @@ try {
   logger.info(
     `Deleted ${countToDelete} user(s). Remaining users=${countRemaining}. Kept id=${KEEP_USER_ID}.`
   );
+  if (FIRELIGHT_CHANNEL_ID) {
+    logger.info(
+      `Updated firelight channel_id to ${FIRELIGHT_CHANNEL_ID} and message_id to ${FIRELIGHT_MESSAGE_ID}.`
+    );
+  } else {
+    logger.warn("FIRELIGHT_CHANNEL_ID not set; firelight_config not updated.");
+  }
 } catch (err) {
   logger.error("Failed to prune users:", err?.message || err);
   process.exit(1);
