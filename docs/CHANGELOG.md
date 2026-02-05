@@ -26,6 +26,11 @@ All notable, user-facing changes are documented here.
 - `/my-lp` and Daily Heartbeat LP sections now show USD values for principal and fees with consistent decimals and small-value precision.
 - Daily heartbeat loan section formatting adjusted (tier colors moved to risk lines, collateral line removed).
 
+## [2026-02-05]
+
+### Changed
+- LP alert headers now show a compact status + tier summary for better watch notifications.
+
 ## [2026-01-30]
 
 ### Changed
