@@ -43,7 +43,16 @@ module.exports = {
       "*Constraint:* Shield does not warn publicly or justify enforcement.",
     ].join("\n");
 
+    const datumDesc = [
+      "*Classification:* Recorder  ",
+      "*Function:* Reconstructs and reports historical on-chain interactions.  ",
+      "*Behavior:* Aggregates, normalizes, and presents records derived from public data.  ",
+      "*Constraint:* Datum does not monitor live conditions or issue alerts.",
+    ].join("\n");
+
     const automataDesc = [
+      "**Automata**",
+      "",
       "*Classification:* System Processes  ",
       "*Function:* Logging, routing, access control, and automation.  ",
       "*Behavior:* Deterministic.  ",
@@ -54,30 +63,37 @@ module.exports = {
       "*Not all system components are documented.*",
     ].join("\n");
 
-    const sentinelTitleEmbed = new EmbedBuilder().setTitle("Liquidity Sentinel");
-    const sentinelImageEmbed = new EmbedBuilder().setImage(
+    const sentinelImageEmbed = new EmbedBuilder()
+      .setTitle("Liquidity Sentinel")
+      .setImage(
       "https://raw.githubusercontent.com/go140point6/liquidity-sentinel/main/img/liquidity-sentinel.png"
     );
     const sentinelBodyEmbed = new EmbedBuilder().setDescription(sentinelDesc);
 
-    const shieldTitleEmbed = new EmbedBuilder().setTitle("Liquidity Shield");
-    const shieldImageEmbed = new EmbedBuilder().setImage(
+    const shieldImageEmbed = new EmbedBuilder()
+      .setTitle("Liquidity Shield")
+      .setImage(
       "https://raw.githubusercontent.com/go140point6/liquidity-sentinel/main/img/liquidity-shield.png"
     );
     const shieldBodyEmbed = new EmbedBuilder().setDescription(shieldDesc);
 
-    const automataTitleEmbed = new EmbedBuilder().setTitle("Automata");
+    const datumImageEmbed = new EmbedBuilder()
+      .setTitle("Liquidity Datum")
+      .setImage(
+      "https://raw.githubusercontent.com/go140point6/liquidity-sentinel/main/img/liquidity-shield.png"
+    );
+    const datumBodyEmbed = new EmbedBuilder().setDescription(datumDesc);
+
     const automataBodyEmbed = new EmbedBuilder().setDescription(automataDesc);
 
     await interaction.reply({
       embeds: [
-        sentinelTitleEmbed,
         sentinelImageEmbed,
         sentinelBodyEmbed,
-        shieldTitleEmbed,
         shieldImageEmbed,
         shieldBodyEmbed,
-        automataTitleEmbed,
+        datumImageEmbed,
+        datumBodyEmbed,
         automataBodyEmbed,
       ],
     });
