@@ -245,6 +245,9 @@ CREATE TABLE users (
   discord_id    TEXT NOT NULL UNIQUE,
   discord_name  TEXT,
   accepts_dm    INTEGER NOT NULL DEFAULT 0 CHECK (accepts_dm IN (0,1)),
+  heartbeat_hour    INTEGER NOT NULL DEFAULT 3 CHECK (heartbeat_hour BETWEEN 0 AND 23),
+  heartbeat_enabled INTEGER NOT NULL DEFAULT 1 CHECK (heartbeat_enabled IN (0,1)),
+  heartbeat_tz  TEXT NOT NULL DEFAULT 'America/Los_Angeles',
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );

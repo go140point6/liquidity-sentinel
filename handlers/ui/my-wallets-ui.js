@@ -18,6 +18,51 @@ const { ephemeralFlags } = require("../../utils/discord/ephemerals");
 const { shortenAddress } = require("../../utils/ethers/shortenAddress");
 const { formatAddressLink } = require("../../utils/links");
 
+const DEFAULT_HEARTBEAT_TZ = "America/Los_Angeles";
+const TZ_LIST = typeof Intl.supportedValuesOf === "function"
+  ? Intl.supportedValuesOf("timeZone")
+  : [
+      "UTC",
+      "America/Los_Angeles",
+      "America/Denver",
+      "America/Chicago",
+      "America/New_York",
+      "Europe/London",
+      "Europe/Berlin",
+      "Asia/Tokyo",
+      "Asia/Singapore",
+    ];
+
+function getTzRegions() {
+  const regions = new Set();
+  for (const tz of TZ_LIST) {
+    const [region] = tz.split("/");
+    regions.add(region || "Other");
+  }
+  return Array.from(regions).sort();
+}
+
+function getTzForRegion(region) {
+  return TZ_LIST.filter((tz) => {
+    const [r] = tz.split("/");
+    return (r || "Other") === region;
+  }).sort();
+}
+
+function getRegionFromTz(tz) {
+  if (!tz) return null;
+  const [region] = String(tz).split("/");
+  return region || null;
+}
+
+function formatHourLabel(hour) {
+  if (!Number.isInteger(hour)) return "n/a";
+  const h = hour % 24;
+  const suffix = h >= 12 ? "PM" : "AM";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${String(h12).padStart(2, "0")}:00 ${suffix}`;
+}
+
 // ===================== UI LOCK START =====================
 // One in-flight mw action per user. Everything else is ACKed and ignored.
 const MW_LOCK_TTL_MS = 2500;
@@ -47,16 +92,19 @@ function releaseLock(actorId, seq) {
 
 // ---------------- UI helpers ----------------
 
-function buildWalletsEmbed({ discordName, wallets }) {
+function buildWalletsEmbed({ discordName, wallets, heartbeatHour, heartbeatTz, heartbeatEnabled }) {
+  const hbTz = heartbeatTz || DEFAULT_HEARTBEAT_TZ;
+  const hbHour = Number.isInteger(heartbeatHour) ? heartbeatHour : 3;
+  const hbEnabled = heartbeatEnabled !== 0;
+  const hbLine = `Heartbeat: **${formatHourLabel(hbHour)}** (${hbTz})${
+    hbEnabled ? "" : " — _disabled_"
+  }`;
   const embed = new EmbedBuilder()
     .setTitle("My Wallets")
     .setDescription(
       [
         discordName ? `User: **${discordName}**` : null,
-        "",
-        "Add or remove wallets you want monitored.",
-        "Status = In Range or Out of Range.",
-        "Tier = how close you are to the edge within that status.",
+        hbLine,
       ]
         .filter(Boolean)
         .join("\n")
@@ -102,6 +150,10 @@ function mainButtonsRow({ userKey }) {
     new ButtonBuilder()
       .setCustomId(`mw:flags:${userKey}`)
       .setLabel("Flags")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`mw:heartbeat:${userKey}`)
+      .setLabel("Heartbeat")
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId(`mw:done:${userKey}`)
@@ -204,11 +256,142 @@ function walletModal({ userKey, chainId }) {
   return modal;
 }
 
+function heartbeatRegionRow({ userKey }) {
+  const regions = getTzRegions().slice(0, 25).map((r) => ({
+    label: r,
+    value: r,
+  }));
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`mw:hbregion:${userKey}`)
+    .setPlaceholder("Select a region")
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addOptions(regions);
+  return new ActionRowBuilder().addComponents(menu);
+}
+
+function heartbeatTzRow({ userKey, region, page }) {
+  const all = getTzForRegion(region);
+  const pageSize = 23; // leave room for Prev/Next options
+  const maxPage = Math.max(0, Math.ceil(all.length / pageSize) - 1);
+  const safePage = Math.min(Math.max(page, 0), maxPage);
+  const slice = all.slice(safePage * pageSize, safePage * pageSize + pageSize);
+  const options = slice.map((tz) => ({ label: tz, value: tz }));
+
+  if (safePage > 0) {
+    options.unshift({ label: "← Prev page", value: "__prev__" });
+  }
+  if (safePage < maxPage) {
+    options.push({ label: "Next page →", value: "__next__" });
+  }
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`mw:hbtz:${userKey}:${region}:${safePage}`)
+    .setPlaceholder(`Select a timezone (${region})`)
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addOptions(options);
+  return new ActionRowBuilder().addComponents(menu);
+}
+
+function heartbeatTzPager({ userKey, region, page }) {
+  const all = getTzForRegion(region);
+  const pageSize = 23; // keep in sync with heartbeatTzRow
+  const maxPage = Math.max(0, Math.ceil(all.length / pageSize) - 1);
+  const safePage = Math.min(Math.max(page, 0), maxPage);
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`mw:hbpage:${userKey}:${region}:${safePage - 1}`)
+      .setLabel("Prev")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(safePage <= 0),
+    new ButtonBuilder()
+      .setCustomId(`mw:hbpage:${userKey}:${region}:${safePage + 1}`)
+      .setLabel("Next")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(safePage >= maxPage),
+    new ButtonBuilder()
+      .setCustomId(`mw:hbkeep:${userKey}`)
+      .setLabel("Use current TZ")
+      .setStyle(ButtonStyle.Primary)
+  );
+}
+
+function heartbeatModal({ userKey, currentHour, enabled }) {
+  const modal = new ModalBuilder()
+    .setCustomId(`mw:hbmodal:${userKey}`)
+    .setTitle("Daily Heartbeat Schedule");
+
+  const hourInput = new TextInputBuilder()
+    .setCustomId("hour")
+    .setLabel("Hour (0-23, your local time)")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true);
+
+  if (Number.isInteger(currentHour)) {
+    hourInput.setValue(String(currentHour));
+  }
+
+  const enabledInput = new TextInputBuilder()
+    .setCustomId("enabled")
+    .setLabel("Enable heartbeat? (yes/no)")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false);
+
+  if (enabled === 0) enabledInput.setValue("no");
+  if (enabled === 1) enabledInput.setValue("yes");
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(hourInput),
+    new ActionRowBuilder().addComponents(enabledInput)
+  );
+
+  return modal;
+}
+
+function heartbeatModalWithTz({ userKey, tz, currentHour, enabled }) {
+  const modal = new ModalBuilder()
+    .setCustomId(`mw:hbmodal:${userKey}:${tz}`)
+    .setTitle("Daily Heartbeat Schedule");
+
+  const hourInput = new TextInputBuilder()
+    .setCustomId("hour")
+    .setLabel("Hour (0-23, your local time)")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true);
+
+  if (Number.isInteger(currentHour)) {
+    hourInput.setValue(String(currentHour));
+  }
+
+  const enabledInput = new TextInputBuilder()
+    .setCustomId("enabled")
+    .setLabel("Enable heartbeat? (yes/no)")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false);
+
+  if (enabled === 0) enabledInput.setValue("no");
+  if (enabled === 1) enabledInput.setValue("yes");
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(hourInput),
+    new ActionRowBuilder().addComponents(enabledInput)
+  );
+
+  return modal;
+}
+
 // ---------------- Renders ----------------
 
 function renderMain({ actorId, discordName, userId, q }) {
   const wallets = q.selUserWallets.all(userId);
-  const embed = buildWalletsEmbed({ discordName, wallets });
+  const userRow = q.selUser.get(userId);
+  const embed = buildWalletsEmbed({
+    discordName,
+    wallets,
+    heartbeatHour: userRow?.heartbeat_hour,
+    heartbeatTz: userRow?.heartbeat_tz,
+    heartbeatEnabled: userRow?.heartbeat_enabled,
+  });
   return { content: "", embeds: [embed], components: [mainButtonsRow({ userKey: actorId })] };
 }
 
@@ -260,8 +443,14 @@ function renderFlagsPick({ actorId, userId, q }) {
   const enabled = wallets.filter((w) => w.is_enabled === 1);
 
   const embed = new EmbedBuilder()
-    .setTitle("Wallet Flags")
-    .setDescription("Toggle LP alert mode for a wallet (status-only vs status + tier).");
+    .setTitle("LP Alert Mode")
+    .setDescription(
+      [
+        "Toggle LP alert mode for a wallet (status-only vs status + tier).",
+        "Status = In Range or Out of Range.",
+        "Tier = how close you are to the edge within that status.",
+      ].join("\n")
+    );
 
   if (!enabled.length) {
     embed.addFields({ name: "Wallets", value: "_No enabled wallets to update._" });
@@ -373,6 +562,48 @@ async function handleMyWalletsInteraction(interaction) {
       return true;
     }
 
+    if (interaction.isModalSubmit?.() && action === "hbmodal") {
+      if (!interaction.deferred && !interaction.replied) {
+        await interaction.deferReply({ flags: ephFlags }).catch(() => {});
+      }
+
+      const tzFromCustom = parts[3];
+      if (tzFromCustom && !TZ_LIST.includes(tzFromCustom)) {
+        await interaction.editReply({
+          content: "❌ Invalid timezone selection. Please try again.",
+        }).catch(() => {});
+        return true;
+      }
+      const hourRaw = (interaction.fields.getTextInputValue("hour") || "").trim();
+      const enabledRaw = (interaction.fields.getTextInputValue("enabled") || "").trim().toLowerCase();
+
+      const hour = Number(hourRaw);
+      if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
+        await interaction.editReply({
+          content: "❌ Hour must be an integer from 0–23.",
+        }).catch(() => {});
+        return true;
+      }
+
+      let enabled = 1;
+      if (enabledRaw) {
+        if (["no", "n", "off", "disable", "disabled", "0"].includes(enabledRaw)) enabled = 0;
+        else if (["yes", "y", "on", "enable", "enabled", "1"].includes(enabledRaw)) enabled = 1;
+        else {
+          await interaction.editReply({
+            content: "❌ Enable must be yes/no (or leave blank).",
+          }).catch(() => {});
+          return true;
+        }
+      }
+
+      const userRow = q.selUser.get(userId);
+      const tz = tzFromCustom || userRow?.heartbeat_tz || DEFAULT_HEARTBEAT_TZ;
+      q.setUserHeartbeat.run(hour, enabled, tz, userId);
+      await interaction.editReply(renderMain({ actorId, discordName, userId, q })).catch(() => {});
+      return true;
+    }
+
     // ---------------- Buttons ----------------
     if (interaction.isButton?.()) {
       if (action === "done") {
@@ -397,6 +628,68 @@ async function handleMyWalletsInteraction(interaction) {
 
       if (action === "flags") {
         await interaction.update(renderFlagsPick({ actorId, userId, q })).catch(() => {});
+        return true;
+      }
+
+      if (action === "heartbeat") {
+        const userRow = q.selUser.get(userId);
+        const userRegion = getRegionFromTz(userRow?.heartbeat_tz) || "America";
+        try {
+          const embed = new EmbedBuilder()
+            .setTitle("Daily Heartbeat")
+            .setDescription(
+              [
+                "Select a region, then pick your timezone.",
+                "Or choose **Use current TZ** to keep your existing timezone.",
+              ].join("\n")
+            );
+          await interaction.update({
+            embeds: [embed],
+            components: [
+              heartbeatRegionRow({ userKey: actorId }),
+              heartbeatTzPager({ userKey: actorId, region: userRegion, page: 0 }),
+              cancelRow({ userKey: actorId }),
+            ],
+          });
+        } catch (err) {
+          await ackUpdate(interaction);
+          await replyOnce(interaction, `❌ Could not open the modal: ${err.message}`, ephFlags);
+        }
+        return true;
+      }
+
+      if (action === "hbkeep") {
+        const userRow = q.selUser.get(userId);
+        try {
+          await interaction.showModal(
+            heartbeatModalWithTz({
+              userKey: actorId,
+              tz: userRow?.heartbeat_tz || DEFAULT_HEARTBEAT_TZ,
+              currentHour: userRow?.heartbeat_hour ?? null,
+              enabled: userRow?.heartbeat_enabled ?? 1,
+            })
+          );
+        } catch (err) {
+          await ackUpdate(interaction);
+          await replyOnce(interaction, `❌ Could not open the modal: ${err.message}`, ephFlags);
+        }
+        return true;
+      }
+
+      if (action === "hbpage") {
+        const region = parts[3];
+        const page = Number(parts[4]);
+        const embed = new EmbedBuilder()
+          .setTitle("Daily Heartbeat")
+          .setDescription(`Select a timezone in **${region}**.`);
+        await interaction.update({
+          embeds: [embed],
+          components: [
+            heartbeatTzRow({ userKey: actorId, region, page }),
+            heartbeatTzPager({ userKey: actorId, region, page }),
+            cancelRow({ userKey: actorId }),
+          ],
+        });
         return true;
       }
 
@@ -456,6 +749,59 @@ async function handleMyWalletsInteraction(interaction) {
         q.setWalletLpStatusOnly.run(nextVal, walletId, userId);
 
         await interaction.update(renderMain({ actorId, discordName, userId, q })).catch(() => {});
+        return true;
+      }
+
+      if (action === "hbregion") {
+        const region = interaction.values?.[0];
+        const embed = new EmbedBuilder()
+          .setTitle("Daily Heartbeat")
+          .setDescription(`Select a timezone in **${region}**.`);
+        await interaction.update({
+          embeds: [embed],
+          components: [
+            heartbeatTzRow({ userKey: actorId, region, page: 0 }),
+            heartbeatTzPager({ userKey: actorId, region, page: 0 }),
+            cancelRow({ userKey: actorId }),
+          ],
+        });
+        return true;
+      }
+
+      if (action === "hbtz") {
+        const region = parts[3];
+        const page = Number(parts[4] || 0);
+        const tz = interaction.values?.[0];
+
+        if (tz === "__next__" || tz === "__prev__") {
+          const nextPage = tz === "__next__" ? page + 1 : page - 1;
+          const embed = new EmbedBuilder()
+            .setTitle("Daily Heartbeat")
+            .setDescription(`Select a timezone in **${region}**.`);
+          await interaction.update({
+            embeds: [embed],
+            components: [
+              heartbeatTzRow({ userKey: actorId, region, page: nextPage }),
+              heartbeatTzPager({ userKey: actorId, region, page: nextPage }),
+              cancelRow({ userKey: actorId }),
+            ],
+          });
+          return true;
+        }
+        const userRow = q.selUser.get(userId);
+        try {
+          await interaction.showModal(
+            heartbeatModalWithTz({
+              userKey: actorId,
+              tz,
+              currentHour: userRow?.heartbeat_hour ?? null,
+              enabled: userRow?.heartbeat_enabled ?? 1,
+            })
+          );
+        } catch (err) {
+          await ackUpdate(interaction);
+          await replyOnce(interaction, `❌ Could not open the modal: ${err.message}`, ephFlags);
+        }
         return true;
       }
     }

@@ -25,6 +25,7 @@ function startMonitoringJob() {
   logger.startup(`[CRON] Using schedule: ${CRON_SCHED}`);
 
   let isRunning = false;
+  const JITTER_MAX_MS = 60_000;
 
   async function runOnce(label) {
     if (isRunning) {
@@ -52,7 +53,11 @@ function startMonitoringJob() {
   void runOnce("(startup) Loan + LP monitor");
 
   // Schedule recurring
-  cron.schedule(CRON_SCHED, () => runOnce("Loan + LP monitor"));
+  cron.schedule(CRON_SCHED, () => {
+    const jitterMs = Math.floor(Math.random() * JITTER_MAX_MS);
+    logger.debug(`[CRON] Jittering monitor by ${jitterMs}ms`);
+    setTimeout(() => runOnce("Loan + LP monitor"), jitterMs);
+  });
 }
 
 module.exports = { startMonitoringJob };

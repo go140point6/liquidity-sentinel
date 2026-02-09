@@ -150,6 +150,9 @@ function initSchema(db) {
     discord_id    TEXT NOT NULL UNIQUE,
     discord_name  TEXT,
     accepts_dm    INTEGER NOT NULL DEFAULT 0 CHECK (accepts_dm IN (0,1)),
+    heartbeat_hour    INTEGER NOT NULL DEFAULT 3 CHECK (heartbeat_hour BETWEEN 0 AND 23),
+    heartbeat_enabled INTEGER NOT NULL DEFAULT 1 CHECK (heartbeat_enabled IN (0,1)),
+    heartbeat_tz  TEXT NOT NULL DEFAULT 'America/Los_Angeles',
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -381,6 +384,17 @@ function initSchema(db) {
   );
 
   ensureColumn("firelight_config", "last_capacity", "TEXT");
+  ensureColumn("users", "heartbeat_hour", "INTEGER NOT NULL DEFAULT 3");
+  ensureColumn("users", "heartbeat_enabled", "INTEGER NOT NULL DEFAULT 1");
+  ensureColumn("users", "heartbeat_tz", "TEXT NOT NULL DEFAULT 'America/Los_Angeles'");
+
+  db.exec(`
+    UPDATE users
+    SET heartbeat_hour = COALESCE(heartbeat_hour, 3),
+        heartbeat_enabled = COALESCE(heartbeat_enabled, 1),
+        heartbeat_tz = COALESCE(heartbeat_tz, 'America/Los_Angeles')
+    WHERE heartbeat_hour IS NULL OR heartbeat_enabled IS NULL OR heartbeat_tz IS NULL
+  `);
 
   if (alertTypeAdded) {
     const rows = db

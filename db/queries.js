@@ -33,7 +33,7 @@ function prepareQueries(db) {
     // USERS
     // =========================
     selUser: db.prepare(`
-      SELECT id, discord_id, discord_name, accepts_dm
+      SELECT id, discord_id, discord_name, accepts_dm, heartbeat_hour, heartbeat_enabled, heartbeat_tz
       FROM users
       WHERE id = ?
       LIMIT 1
@@ -43,6 +43,12 @@ function prepareQueries(db) {
     setUserDm: db.prepare(`
       UPDATE users
       SET accepts_dm = ?, updated_at = datetime('now')
+      WHERE id = ?
+    `),
+
+    setUserHeartbeat: db.prepare(`
+      UPDATE users
+      SET heartbeat_hour = ?, heartbeat_enabled = ?, heartbeat_tz = ?, updated_at = datetime('now')
       WHERE id = ?
     `),
 

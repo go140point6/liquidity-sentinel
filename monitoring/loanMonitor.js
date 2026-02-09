@@ -22,6 +22,7 @@ const activePoolAbi = require("../abi/activePool.json");
 
 const { getDb } = require("../db");
 const { getProviderForChain } = require("../utils/ethers/providers");
+const { acquireLock, releaseLock } = require("../utils/lock");
 const { handleLiquidationAlert, handleRedemptionAlert } = require("./alertEngine");
 const {
   applyGlobalIrOffset,
@@ -71,6 +72,7 @@ const REDEMP_DEBT_AHEAD_HIGH_PCT = requireNumberEnv("REDEMP_DEBT_AHEAD_HIGH_PCT"
 
 const CDP_REDEMPTION_TRIGGER = requireNumberEnv("CDP_REDEMPTION_TRIGGER");
 const SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SNAPSHOT_STALE_WARN_MIN");
+const SNAPSHOT_LOCK_NAME = "snapshot-refresh";
 
 const CDP_PRICE_MODE = requireEnv("CDP_PRICE_MODE").toUpperCase();
 if (!["POOL", "ENV"].includes(CDP_PRICE_MODE)) {
@@ -93,6 +95,20 @@ setDebtAheadTierThresholds(
   REDEMP_DEBT_AHEAD_MED_PCT,
   REDEMP_DEBT_AHEAD_HIGH_PCT
 );
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function acquireSnapshotLock({ waitMs = 0, intervalMs = 500 } = {}) {
+  const deadline = Date.now() + Math.max(0, waitMs || 0);
+  while (true) {
+    const lockPath = acquireLock(SNAPSHOT_LOCK_NAME);
+    if (lockPath) return lockPath;
+    if (Date.now() >= deadline) return null;
+    await sleep(intervalMs);
+  }
+}
 
 
 // -----------------------------
@@ -978,6 +994,7 @@ async function monitorLoans() {
 
   let globalIrMap = null;
   let cdpState = null;
+  let rpcLockPath = null;
   const providers = {};
   const getP = (chainId) => (providers[chainId] ||= getProviderForChain(chainId, CHAINS_CONFIG));
 
@@ -988,91 +1005,134 @@ async function monitorLoans() {
     byChain.get(cid).push(r);
   }
 
-  for (const [chainId, chainRows] of byChain.entries()) {
-    let provider = null;
+  try {
+    for (const [chainId, chainRows] of byChain.entries()) {
+      let provider = null;
 
-    for (const row of chainRows) {
-      const debtSnap = getDebtAheadSnapshot({
-        userId: row.userId,
-        walletId: row.walletId,
-        contractId: row.contractId,
-        troveId: row.troveId,
-      });
+      for (const row of chainRows) {
+        const debtSnap = getDebtAheadSnapshot({
+          userId: row.userId,
+          walletId: row.walletId,
+          contractId: row.contractId,
+          troveId: row.troveId,
+        });
 
-      const snapshotFresh = isSnapshotFresh(debtSnap?.snapshotAt);
+        const snapshotFresh = isSnapshotFresh(debtSnap?.snapshotAt);
 
-      if (snapshotFresh) {
+        if (snapshotFresh) {
+          logger.debug(
+            `[loanMonitor] trove=${row.troveId} ${row.protocol || "UNKNOWN_PROTOCOL"} ` +
+              `${row.chainId || chainId} using snapshot`
+          );
+          try {
+            await describeLoanFromSnapshot(row, debtSnap, { cdpState });
+          } catch (err) {
+            logger.error(
+              `[loanMonitor] Failed snapshot troveId=${row.troveId} chain=${chainId} protocol=${row.protocol}: ${err?.message || err}`
+            );
+          }
+          continue;
+        }
+
+        if (!rpcLockPath) {
+          rpcLockPath = await acquireSnapshotLock({ waitMs: 10_000 });
+          if (!rpcLockPath) {
+            const freshSnap = getDebtAheadSnapshot({
+              userId: row.userId,
+              walletId: row.walletId,
+              contractId: row.contractId,
+              troveId: row.troveId,
+            });
+            if (isSnapshotFresh(freshSnap?.snapshotAt)) {
+              logger.debug(
+                `[loanMonitor] trove=${row.troveId} ${row.protocol || "UNKNOWN_PROTOCOL"} ` +
+                  `${row.chainId || chainId} using refreshed snapshot`
+              );
+              try {
+                await describeLoanFromSnapshot(row, freshSnap, { cdpState });
+              } catch (err) {
+                logger.error(
+                  `[loanMonitor] Failed snapshot troveId=${row.troveId} chain=${chainId} protocol=${row.protocol}: ${err?.message || err}`
+                );
+              }
+              continue;
+            }
+            logger.warn(
+              `[loanMonitor] Snapshot stale and refresh lock busy; using stale snapshot for trove=${row.troveId}`
+            );
+            if (freshSnap) {
+              try {
+                await describeLoanFromSnapshot(row, freshSnap, { cdpState });
+              } catch (err) {
+                logger.error(
+                  `[loanMonitor] Failed snapshot troveId=${row.troveId} chain=${chainId} protocol=${row.protocol}: ${err?.message || err}`
+                );
+              }
+            }
+            continue;
+          }
+        }
+
         logger.debug(
           `[loanMonitor] trove=${row.troveId} ${row.protocol || "UNKNOWN_PROTOCOL"} ` +
-            `${row.chainId || chainId} using snapshot`
+            `${row.chainId || chainId} using RPC fallback`
         );
+        if (!provider) {
+          try {
+            provider = getP(chainId);
+          } catch (e) {
+            logger.warn(`[loanMonitor] Skipping chain ${chainId}: ${e?.message || e}`);
+            break;
+          }
+        }
+
+        if (!globalIrMap) {
+          try {
+            globalIrMap = await fetchGlobalIrPctMap();
+          } catch (e) {
+            logger.warn(`[loanMonitor] Global IR unavailable: ${e?.message || e}`);
+            globalIrMap = {};
+          }
+        }
+
+        if (!cdpState) {
+          cdpState = {
+            state: "UNKNOWN",
+            trigger: CDP_REDEMPTION_TRIGGER,
+            diff: null,
+            label: "no CDP price available",
+          };
+          try {
+            const flrProvider = getP("FLR");
+            const cdpPrice = await getCdpPrice(flrProvider);
+            cdpState = classifyCdpRedemptionState(cdpPrice);
+          } catch (e) {
+            logger.warn(`[loanMonitor] CDP price/state unavailable: ${e?.message || e}`);
+          }
+          const { irOffsetPp } = getTestOffsets();
+          if (irOffsetPp !== 0 && cdpState) {
+            cdpState = {
+              ...cdpState,
+              state: "ACTIVE",
+              label: `${cdpState.label} (test IR override)`,
+            };
+          }
+        }
+
         try {
-          await describeLoanFromSnapshot(row, debtSnap, { cdpState });
+          await describeLoanPosition(provider, chainId, row.protocol || "UNKNOWN_PROTOCOL", row, {
+            cdpState,
+            globalIrMap,
+          });
         } catch (err) {
           logger.error(
-            `[loanMonitor] Failed snapshot troveId=${row.troveId} chain=${chainId} protocol=${row.protocol}: ${err?.message || err}`
+            `[loanMonitor] Failed troveId=${row.troveId} chain=${chainId} protocol=${row.protocol}: ${err?.message || err}`
           );
         }
-        continue;
-      }
-
-      logger.debug(
-        `[loanMonitor] trove=${row.troveId} ${row.protocol || "UNKNOWN_PROTOCOL"} ` +
-          `${row.chainId || chainId} using RPC fallback`
-      );
-      if (!provider) {
-        try {
-          provider = getP(chainId);
-        } catch (e) {
-          logger.warn(`[loanMonitor] Skipping chain ${chainId}: ${e?.message || e}`);
-          break;
-        }
-      }
-
-      if (!globalIrMap) {
-        try {
-          globalIrMap = await fetchGlobalIrPctMap();
-        } catch (e) {
-          logger.warn(`[loanMonitor] Global IR unavailable: ${e?.message || e}`);
-          globalIrMap = {};
-        }
-      }
-
-      if (!cdpState) {
-        cdpState = {
-          state: "UNKNOWN",
-          trigger: CDP_REDEMPTION_TRIGGER,
-          diff: null,
-          label: "no CDP price available",
-        };
-        try {
-          const flrProvider = getP("FLR");
-          const cdpPrice = await getCdpPrice(flrProvider);
-          cdpState = classifyCdpRedemptionState(cdpPrice);
-        } catch (e) {
-          logger.warn(`[loanMonitor] CDP price/state unavailable: ${e?.message || e}`);
-        }
-        const { irOffsetPp } = getTestOffsets();
-        if (irOffsetPp !== 0 && cdpState) {
-          cdpState = {
-            ...cdpState,
-            state: "ACTIVE",
-            label: `${cdpState.label} (test IR override)`,
-          };
-        }
-      }
-
-      try {
-        await describeLoanPosition(provider, chainId, row.protocol || "UNKNOWN_PROTOCOL", row, {
-          cdpState,
-          globalIrMap,
-        });
-      } catch (err) {
-        logger.error(
-          `[loanMonitor] Failed troveId=${row.troveId} chain=${chainId} protocol=${row.protocol}: ${err?.message || err}`
-        );
       }
     }
+  } finally {
+    releaseLock(rpcLockPath);
   }
 
   logRunApplied();

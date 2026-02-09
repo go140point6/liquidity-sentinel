@@ -23,6 +23,7 @@ const { TickMath, SqrtPriceMath } = require("@uniswap/v3-sdk");
 
 const { getDb } = require("../db");
 const { getProviderForChain } = require("../utils/ethers/providers");
+const { acquireLock, releaseLock } = require("../utils/lock");
 const { handleLpRangeAlert } = require("./alertEngine");
 const { applyLpTickShift, logRunApplied } = require("./testOffsets");
 const logger = require("../utils/logger");
@@ -107,6 +108,21 @@ const LP_EDGE_HIGH_FRAC = Number(process.env.LP_EDGE_HIGH_FRAC);
 const LP_OUT_WARN_FRAC = Number(process.env.LP_OUT_WARN_FRAC);
 const LP_OUT_HIGH_FRAC = Number(process.env.LP_OUT_HIGH_FRAC);
 const SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SNAPSHOT_STALE_WARN_MIN");
+const SNAPSHOT_LOCK_NAME = "snapshot-refresh";
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function acquireSnapshotLock({ waitMs = 0, intervalMs = 500 } = {}) {
+  const deadline = Date.now() + Math.max(0, waitMs || 0);
+  while (true) {
+    const lockPath = acquireLock(SNAPSHOT_LOCK_NAME);
+    if (lockPath) return lockPath;
+    if (Date.now() >= deadline) return null;
+    await sleep(intervalMs);
+  }
+}
 
 // -----------------------------
 // Standard Uniswap v3 math
@@ -1313,6 +1329,7 @@ async function monitorLPs(options = {}) {
   let totalCount = 0;
   let snapshotCount = 0;
   let rpcCount = 0;
+  let rpcLockPath = null;
 
   const rows = getMonitoredLpRows();
   if (!rows || rows.length === 0) {
@@ -1327,53 +1344,96 @@ async function monitorLPs(options = {}) {
     byChain.get(chainId).push(r);
   }
 
-  for (const [chainId, chainRows] of byChain.entries()) {
-    let provider = null;
+  try {
+    for (const [chainId, chainRows] of byChain.entries()) {
+      let provider = null;
 
-    for (const row of chainRows) {
-      totalCount += 1;
-      const snap = getLpSnapshot({
-        userId: row.userId,
-        walletId: row.walletId,
-        contractId: row.contractId,
-        tokenId: row.tokenId,
-      });
+      for (const row of chainRows) {
+        totalCount += 1;
+        const snap = getLpSnapshot({
+          userId: row.userId,
+          walletId: row.walletId,
+          contractId: row.contractId,
+          tokenId: row.tokenId,
+        });
 
-      const snapshotFresh = isSnapshotFresh(snap?.snapshotAt);
-      if (snapshotFresh) {
-        snapshotCount += 1;
+        const snapshotFresh = isSnapshotFresh(snap?.snapshotAt);
+        if (snapshotFresh) {
+          snapshotCount += 1;
+          try {
+            await describeLpFromSnapshot(row, snap, { verbose });
+          } catch (err) {
+            logger.error(
+              `  [ERROR] Failed snapshot LP tokenId=${row.tokenId} on ${chainId}:`,
+              err?.message || err
+            );
+          }
+          continue;
+        }
+
+        if (!rpcLockPath) {
+          rpcLockPath = await acquireSnapshotLock({ waitMs: 10_000 });
+          if (!rpcLockPath) {
+            const freshSnap = getLpSnapshot({
+              userId: row.userId,
+              walletId: row.walletId,
+              contractId: row.contractId,
+              tokenId: row.tokenId,
+            });
+            if (isSnapshotFresh(freshSnap?.snapshotAt)) {
+              snapshotCount += 1;
+              try {
+                await describeLpFromSnapshot(row, freshSnap, { verbose });
+              } catch (err) {
+                logger.error(
+                  `  [ERROR] Failed snapshot LP tokenId=${row.tokenId} on ${chainId}:`,
+                  err?.message || err
+                );
+              }
+              continue;
+            }
+            logger.warn(
+              `[LP] Snapshot stale and refresh lock busy; using stale snapshot for token=${row.tokenId}`
+            );
+            if (freshSnap) {
+              snapshotCount += 1;
+              try {
+                await describeLpFromSnapshot(row, freshSnap, { verbose });
+              } catch (err) {
+                logger.error(
+                  `  [ERROR] Failed snapshot LP tokenId=${row.tokenId} on ${chainId}:`,
+                  err?.message || err
+                );
+              }
+            }
+            continue;
+          }
+        }
+
+        rpcCount += 1;
+        if (!provider) {
+          try {
+            provider = getProviderForChain(chainId, CHAINS_CONFIG);
+          } catch (err) {
+            logger.warn(`[LP] Skipping chain ${chainId}: ${err?.message || err}`);
+            break;
+          }
+        }
+
         try {
-          await describeLpFromSnapshot(row, snap, { verbose });
+          await describeLpPosition(provider, chainId, row.protocol || "UNKNOWN_PROTOCOL", row, {
+            verbose,
+          });
         } catch (err) {
           logger.error(
-            `  [ERROR] Failed snapshot LP tokenId=${row.tokenId} on ${chainId}:`,
-              err?.message || err
+            `  [ERROR] Failed to describe LP tokenId=${row.tokenId} on ${chainId}:`,
+            err?.message || err
           );
         }
-        continue;
-      }
-
-      rpcCount += 1;
-      if (!provider) {
-        try {
-          provider = getProviderForChain(chainId, CHAINS_CONFIG);
-        } catch (err) {
-          logger.warn(`[LP] Skipping chain ${chainId}: ${err?.message || err}`);
-          break;
-        }
-      }
-
-      try {
-        await describeLpPosition(provider, chainId, row.protocol || "UNKNOWN_PROTOCOL", row, {
-          verbose,
-        });
-      } catch (err) {
-        logger.error(
-          `  [ERROR] Failed to describe LP tokenId=${row.tokenId} on ${chainId}:`,
-          err?.message || err
-        );
       }
     }
+  } finally {
+    releaseLock(rpcLockPath);
   }
 
   logRunApplied();

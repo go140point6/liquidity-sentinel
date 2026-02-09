@@ -4,11 +4,16 @@ const { getLoanSummaries, refreshLoanSnapshots } = require("./loanMonitor");
 const { getLpSummaries, refreshLpSnapshots } = require("./lpMonitor");
 const { createDecimalFormatter } = require("../utils/intlNumberFormats");
 const { getDb } = require("../db");
+const { acquireLock, releaseLock } = require("../utils/lock");
 const logger = require("../utils/logger");
 const { shortenTroveId } = require("../utils/ethers/shortenTroveId");
 const { shortenAddress } = require("../utils/ethers/shortenAddress");
 const { formatLoanTroveLink, formatLpPositionLink, formatAddressLink } = require("../utils/links");
 const { loadPriceCache, isStableUsd, normalizeSymbol } = require("../utils/priceCache");
+const {
+  hasHeartbeatTestOverride,
+  consumeHeartbeatTestOverride,
+} = require("./heartbeatTest");
 
 function requireNumberEnv(name) {
   const raw = process.env[name];
@@ -22,6 +27,8 @@ function requireNumberEnv(name) {
 
 const SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SNAPSHOT_STALE_WARN_MIN");
 const SNAPSHOT_STALE_WARN_MS = Math.max(0, Math.floor(SNAPSHOT_STALE_WARN_MIN * 60 * 1000));
+const DEFAULT_HEARTBEAT_TZ = process.env.HEARTBEAT_TZ || "America/Los_Angeles";
+const SNAPSHOT_LOCK_NAME = "snapshot-refresh";
 
 // -----------------------------
 // Formatting helpers
@@ -85,6 +92,33 @@ function formatSnapshotLine(snapshotAt) {
   const stale = Date.now() - ts * 1000 > SNAPSHOT_STALE_WARN_MS;
   const warn = stale ? " ⚠️ Data may be stale." : "";
   return `Data captured: <t:${ts}:f>${warn}`;
+}
+
+const tzFormatterCache = new Map();
+function getHeartbeatHourNow(tz) {
+  const timeZone = tz || DEFAULT_HEARTBEAT_TZ;
+  let fmt = tzFormatterCache.get(timeZone);
+  if (!fmt) {
+    try {
+      fmt = new Intl.DateTimeFormat("en-US", {
+        timeZone,
+        hour: "2-digit",
+        hour12: false,
+      });
+      tzFormatterCache.set(timeZone, fmt);
+    } catch (_) {
+      fmt = new Intl.DateTimeFormat("en-US", {
+        timeZone: "UTC",
+        hour: "2-digit",
+        hour12: false,
+      });
+      tzFormatterCache.set(timeZone, fmt);
+      logger.warn(`[Heartbeat] Invalid timezone "${timeZone}", using UTC`);
+    }
+  }
+  const hourStr = fmt.format(new Date());
+  const hour = Number.parseInt(hourStr, 10);
+  return Number.isInteger(hour) ? hour : null;
 }
 
 function loanMeaning(tier, kind, aheadPctText) {
@@ -468,7 +502,10 @@ function getHeartbeatRecipients() {
     SELECT DISTINCT
       u.id           AS userId,
       u.discord_id   AS discordId,
-      u.discord_name AS discordName
+      u.discord_name AS discordName,
+      u.heartbeat_hour AS heartbeatHour,
+      u.heartbeat_enabled AS heartbeatEnabled,
+      u.heartbeat_tz AS heartbeatTz
     FROM users u
     JOIN user_wallets uw
       ON uw.user_id = u.id
@@ -511,6 +548,20 @@ async function sendDailyHeartbeat(client) {
     logger.info("[Heartbeat] No recipients (accepts_dm=1 with enabled wallets).");
     return;
   }
+  const filteredRecipients = recipients.filter((r) => {
+    const discordId = String(r.discordId || r.discord_id || "");
+    if (hasHeartbeatTestOverride(discordId)) return true;
+    if ((r.heartbeatEnabled ?? 1) !== 1) return false;
+    const tz = r.heartbeatTz || DEFAULT_HEARTBEAT_TZ;
+    const nowHour = getHeartbeatHourNow(tz);
+    if (nowHour == null) return false;
+    return Number(r.heartbeatHour ?? 3) === nowHour;
+  });
+
+  if (!filteredRecipients.length) {
+    logger.info("[Heartbeat] No recipients scheduled for this hour.");
+    return;
+  }
 
   let allLoanSummaries = [];
   let allLpSummaries = [];
@@ -532,20 +583,30 @@ async function sendDailyHeartbeat(client) {
 
   if (isStale) {
     logger.warn("[Heartbeat] Snapshot data stale; refreshing before send.");
-    try {
-      await refreshLoanSnapshots();
-    } catch (err) {
-      logger.warn("[Heartbeat] Loan snapshot refresh failed:", err?.message || err);
-    }
-    try {
-      await refreshLpSnapshots();
-    } catch (err) {
-      logger.warn("[Heartbeat] LP snapshot refresh failed:", err?.message || err);
-    }
-    try {
-      [allLoanSummaries, allLpSummaries] = await Promise.all([getLoanSummaries(), getLpSummaries()]);
-    } catch (err) {
-      logger.error("[Heartbeat] Failed to re-fetch summaries; using stale data:", err?.message || err);
+    const lockPath = acquireLock(SNAPSHOT_LOCK_NAME);
+    if (!lockPath) {
+      logger.warn("[Heartbeat] Snapshot refresh lock busy; using stale data.");
+    } else {
+      try {
+        await refreshLoanSnapshots();
+      } catch (err) {
+        logger.warn("[Heartbeat] Loan snapshot refresh failed:", err?.message || err);
+      }
+      try {
+        await refreshLpSnapshots();
+      } catch (err) {
+        logger.warn("[Heartbeat] LP snapshot refresh failed:", err?.message || err);
+      }
+      try {
+        [allLoanSummaries, allLpSummaries] = await Promise.all([
+          getLoanSummaries(),
+          getLpSummaries(),
+        ]);
+      } catch (err) {
+        logger.error("[Heartbeat] Failed to re-fetch summaries; using stale data:", err?.message || err);
+      } finally {
+        releaseLock(lockPath);
+      }
     }
   }
 
@@ -553,9 +614,10 @@ async function sendDailyHeartbeat(client) {
 
   const userCache = new Map(); // discordId -> Discord.User
 
-  for (const r of recipients) {
+  for (const r of filteredRecipients) {
     const userIdKey = String(r.userId);
     const discordId = String(r.discordId);
+    consumeHeartbeatTestOverride(discordId);
 
     const userLoans = (allLoanSummaries || []).filter((s) => String(s.userId) === userIdKey);
     const userLps = (allLpSummaries || []).filter((s) => String(s.userId) === userIdKey);
