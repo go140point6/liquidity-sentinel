@@ -80,7 +80,7 @@ module.exports = {
     const datumImageEmbed = new EmbedBuilder()
       .setTitle("Liquidity Datum")
       .setImage(
-      "https://raw.githubusercontent.com/go140point6/liquidity-sentinel/main/img/liquidity-shield.png"
+      "https://raw.githubusercontent.com/go140point6/liquidity-sentinel/main/img/liquidity-datum.png"
     );
     const datumBodyEmbed = new EmbedBuilder().setDescription(datumDesc);
 
