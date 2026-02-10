@@ -14,14 +14,13 @@ function mustEnv(name) {
 
 function startHeartbeatJob(client) {
   const HEARTBEAT_CRON = mustEnv("HEARTBEAT_CRON");
-  const HEARTBEAT_TZ = mustEnv("HEARTBEAT_TZ");
 
   if (!cron.validate(HEARTBEAT_CRON)) {
     logger.error(`[heartbeatJob] Invalid HEARTBEAT_CRON: "${HEARTBEAT_CRON}"`);
     process.exit(1);
   }
 
-  logger.startup(`[CRON] Using heartbeat schedule: ${HEARTBEAT_CRON} (${HEARTBEAT_TZ})`);
+  logger.startup(`[CRON] Using heartbeat schedule: ${HEARTBEAT_CRON}`);
 
   let isRunning = false;
 
@@ -46,7 +45,7 @@ function startHeartbeatJob(client) {
     }
   }
 
-  cron.schedule(HEARTBEAT_CRON, () => runOnce("Daily heartbeat"), { timezone: HEARTBEAT_TZ });
+  cron.schedule(HEARTBEAT_CRON, () => runOnce("Daily heartbeat"));
 }
 
 module.exports = { startHeartbeatJob };
