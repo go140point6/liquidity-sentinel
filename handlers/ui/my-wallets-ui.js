@@ -563,7 +563,8 @@ async function handleMyWalletsInteraction(interaction) {
     }
 
     if (interaction.isModalSubmit?.() && action === "hbmodal") {
-      if (!interaction.deferred && !interaction.replied) {
+      const canUpdate = Boolean(interaction.message);
+      if (!canUpdate && !interaction.deferred && !interaction.replied) {
         await interaction.deferReply({ flags: ephFlags }).catch(() => {});
       }
 
@@ -600,7 +601,11 @@ async function handleMyWalletsInteraction(interaction) {
       const userRow = q.selUser.get(userId);
       const tz = tzFromCustom || userRow?.heartbeat_tz || DEFAULT_HEARTBEAT_TZ;
       q.setUserHeartbeat.run(hour, enabled, tz, userId);
-      await interaction.editReply(renderMain({ actorId, discordName, userId, q })).catch(() => {});
+      if (canUpdate) {
+        await interaction.update(renderMain({ actorId, discordName, userId, q })).catch(() => {});
+      } else {
+        await interaction.editReply(renderMain({ actorId, discordName, userId, q })).catch(() => {});
+      }
       return true;
     }
 
