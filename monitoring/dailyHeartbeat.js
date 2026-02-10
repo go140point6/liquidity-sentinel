@@ -39,6 +39,24 @@ function chunk(arr, size) {
   return out;
 }
 
+function chunkFieldsBySize(fields, baseSize, maxChars) {
+  const out = [];
+  let current = [];
+  let size = baseSize;
+  for (const f of fields) {
+    const fSize = (f.name?.length || 0) + (f.value?.length || 0);
+    if (current.length >= 25 || size + fSize > maxChars) {
+      if (current.length) out.push(current);
+      current = [];
+      size = baseSize;
+    }
+    current.push(f);
+    size += fSize;
+  }
+  if (current.length) out.push(current);
+  return out;
+}
+
 const fmt2 = createDecimalFormatter(2, 2); // commas + exactly 2 decimals
 const fmt4 = createDecimalFormatter(0, 1); // commas + up to 1 decimal
 const fmt5 = createDecimalFormatter(0, 5); // commas + up to 5 decimals
@@ -50,6 +68,19 @@ function fmtUsd(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return "n/a";
   if (n === 0) return "$0";
   return `$${fmt2.format(n)}`;
+}
+
+function computePoolSharePct(liquidityRaw, poolLiquidityRaw) {
+  if (!liquidityRaw || !poolLiquidityRaw) return null;
+  try {
+    const liq = BigInt(liquidityRaw);
+    const pool = BigInt(poolLiquidityRaw);
+    if (pool <= 0n) return null;
+    const bps = (liq * 10000n) / pool; // 2 decimals
+    return Number(bps) / 100;
+  } catch {
+    return null;
+  }
 }
 
 function fmtNum5(n) {
@@ -227,6 +258,13 @@ function formatLoanField(s, priceCache) {
   }
 
   return { name: title, value: lines.join("\n") };
+}
+
+function lpPoolKey(s) {
+  const pair =
+    s.pairLabel ||
+    `${s.token0Symbol || s.token0 || "?"}-${s.token1Symbol || s.token1 || "?"}`;
+  return `${s.chainId || "?"}|${s.protocol || "UNKNOWN"}|${s.poolAddr || pair}`;
 }
 
 function formatLpField(s, priceCache) {
@@ -420,7 +458,9 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
       new EmbedBuilder().setTitle("Loans").setDescription("_No monitored loans_").setColor("DarkBlue")
     );
   } else {
-    const chunks = chunk(loanFields, 25);
+    const baseSize = "Loans".length + 200;
+    const MAX_EMBED_CHARS = 5200;
+    const chunks = chunkFieldsBySize(loanFields, baseSize, MAX_EMBED_CHARS);
     chunks.forEach((fields, idx) => {
       const fieldIds = new Set(fields.map((f) => f.name));
       const chunkLoans = activeLoanSummaries.filter((s) => {
@@ -456,6 +496,48 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
     })
     .map((s) => formatLpField(s, priceCache));
 
+  const poolShareTotals = new Map();
+  const poolMeta = new Map();
+  for (const s of activeLpSummaries) {
+    const share = computePoolSharePct(s.liquidity, s.poolLiquidity);
+    if (share == null || !Number.isFinite(share)) continue;
+    const key = lpPoolKey(s);
+    poolShareTotals.set(key, (poolShareTotals.get(key) || 0) + share);
+    if (!poolMeta.has(key)) {
+      const pair =
+        s.pairLabel ||
+        `${s.token0Symbol || s.token0 || "?"}-${s.token1Symbol || s.token1 || "?"}`;
+      poolMeta.set(key, {
+        protocol: s.protocol || "UNKNOWN",
+        chainId: s.chainId || "?",
+        pair,
+      });
+    }
+  }
+
+  if (poolShareTotals.size) {
+    const summaryFields = [];
+    for (const [key, pct] of poolShareTotals.entries()) {
+      const meta = poolMeta.get(key);
+      const name = `${meta?.protocol || "UNKNOWN"} ${meta?.pair || "?"} (${meta?.chainId || "?"})`;
+      summaryFields.push({
+        name,
+        value: `Total pool share: **${pct.toFixed(2)}%**`,
+        inline: false,
+        _pct: pct,
+      });
+    }
+    summaryFields.sort((a, b) => (b._pct || 0) - (a._pct || 0));
+    const summaryChunks = chunkFieldsBySize(summaryFields, "Total LP Pool Share".length + 200, 5200);
+    summaryChunks.forEach((fields, idx) => {
+      const e = new EmbedBuilder()
+        .setTitle(idx === 0 ? "Total LP Pool Share" : "Total LP Pool Share (cont.)")
+        .setColor("DarkBlue")
+        .addFields(fields);
+      embeds.push(e);
+    });
+  }
+
   if (!lpFields.length) {
     embeds.push(
       new EmbedBuilder()
@@ -464,7 +546,9 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
         .setColor("DarkBlue")
     );
   } else {
-    const chunks = chunk(lpFields, 25);
+    const baseSize = "LP Positions".length + 200;
+    const MAX_EMBED_CHARS = 5200;
+    const chunks = chunkFieldsBySize(lpFields, baseSize, MAX_EMBED_CHARS);
     chunks.forEach((fields, idx) => {
       const fieldIds = new Set(fields.map((f) => f.name));
       const chunkLps = activeLpSummaries.filter((s) => {
@@ -638,9 +722,8 @@ async function sendDailyHeartbeat(client) {
         userCache.set(discordId, user);
       }
 
-      const embedChunks = chunk(embeds, 10);
-      for (const c of embedChunks) {
-        await user.send({ embeds: c });
+      for (const e of embeds) {
+        await user.send({ embeds: [e] });
       }
 
       logger.info(`[Heartbeat] Sent daily heartbeat to userId=${r.userId} discordId=${discordId}`);

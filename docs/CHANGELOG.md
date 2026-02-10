@@ -31,6 +31,17 @@ All notable, user-facing changes are documented here.
 ### Changed
 - LP alert headers now show a compact status + tier summary for better watch notifications.
 
+## [2026-02-10]
+
+### Added
+- Per-user daily heartbeat schedule with timezone selection (defaults to 3 AM America/Los_Angeles).
+- Daily heartbeat now includes a “Total LP Pool Share” summary by pool/DEX.
+
+### Changed
+- `/my-lp` shows per-position pool share percentages.
+- Daily heartbeat and large commands now split into multiple messages when embeds grow too large.
+- `/my-loans` now mirrors `/my-lp` embed sizing safeguards for large portfolios.
+
 ## [2026-01-30]
 
 ### Changed

@@ -148,48 +148,62 @@ module.exports = {
     const focused = interaction.options.getFocused(true);
     if (focused.name !== "loan") return;
 
-    const protocol = interaction.options.getString("contract");
-    if (!protocol) {
-      await interaction.respond([{ name: "NEW", value: "NEW" }]);
-      return;
-    }
+    const truncate = (str, max) => {
+      if (!str) return str;
+      const s = String(str);
+      if (s.length <= max) return s;
+      return s.slice(0, Math.max(0, max - 1)) + "…";
+    };
 
-    const db = getDb();
-    const discordId = interaction.user.id;
-    const discordName = interaction.user.globalName || interaction.user.username || null;
-    const userId = getOrCreateUserId(db, { discordId, discordName });
+    try {
+      const protocol = interaction.options.getString("contract");
+      if (!protocol) {
+        await interaction.respond([{ name: "NEW", value: "NEW" }]);
+        return;
+      }
 
-    const rows = db
-      .prepare(
+      const db = getDb();
+      const discordId = interaction.user.id;
+      const discordName = interaction.user.globalName || interaction.user.username || null;
+      const userId = getOrCreateUserId(db, { discordId, discordName });
+
+      const rows = db
+        .prepare(
+          `
+          SELECT snapshot_json
+          FROM loan_position_snapshots
+          WHERE user_id = ? AND protocol = ?
         `
-        SELECT snapshot_json
-        FROM loan_position_snapshots
-        WHERE user_id = ? AND protocol = ?
-      `
-      )
-      .all(userId, protocol);
+        )
+        .all(userId, protocol);
 
-    const options = [{ name: "NEW", value: "NEW" }];
-    for (const row of rows) {
-      try {
-        const snap = JSON.parse(row.snapshot_json);
-        const troveId = snap?.troveId;
-        if (!troveId) continue;
-        const label = snap?.walletLabel ? ` (${snap.walletLabel})` : "";
-        options.push({
-          name: `${shortenTroveId(troveId)}${label}`,
-          value: String(troveId),
-        });
-      } catch (_) {}
-      if (options.length >= 25) break;
+      const options = [{ name: "NEW", value: "NEW" }];
+      for (const row of rows) {
+        try {
+          const snap = JSON.parse(row.snapshot_json);
+          const troveId = snap?.troveId;
+          if (!troveId) continue;
+          const labelRaw = snap?.walletLabel ? ` (${snap.walletLabel})` : "";
+          const label = truncate(labelRaw, 40);
+          const name = truncate(`${shortenTroveId(troveId)}${label}`, 100);
+          const value = truncate(String(troveId), 100);
+          options.push({ name, value });
+        } catch (_) {}
+        if (options.length >= 25) break;
+      }
+
+      const query = (focused.value || "").toLowerCase();
+      const filtered = options.filter((opt) =>
+        opt.name.toLowerCase().includes(query) || opt.value.toLowerCase().includes(query)
+      );
+
+      await interaction.respond(filtered.slice(0, 25));
+    } catch (err) {
+      logger.warn(
+        `[redemption-rate] autocomplete failed: ${err?.message || err}`
+      );
+      await interaction.respond([{ name: "NEW", value: "NEW" }]);
     }
-
-    const query = (focused.value || "").toLowerCase();
-    const filtered = options.filter((opt) =>
-      opt.name.toLowerCase().includes(query) || opt.value.toLowerCase().includes(query)
-    );
-
-    await interaction.respond(filtered.slice(0, 25));
   },
 
   async execute(interaction) {
