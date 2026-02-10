@@ -35,6 +35,24 @@ function chunk(arr, size) {
   return out;
 }
 
+function chunkFieldsBySize(fields, baseSize, maxChars) {
+  const out = [];
+  let current = [];
+  let size = baseSize;
+  for (const f of fields) {
+    const fSize = (f.name?.length || 0) + (f.value?.length || 0);
+    if (current.length >= 25 || size + fSize > maxChars) {
+      if (current.length) out.push(current);
+      current = [];
+      size = baseSize;
+    }
+    current.push(f);
+    size += fSize;
+  }
+  if (current.length) out.push(current);
+  return out;
+}
+
 const fmt2 = createDecimalFormatter(0, 2);
 const fmt4 = createDecimalFormatter(0, 4);
 const fmt5 = createDecimalFormatter(0, 5);
@@ -319,7 +337,9 @@ module.exports = {
         return { name: header, value };
       });
 
-      const fieldChunks = chunk(fields, 25).slice(0, 10);
+      const baseSize = "My Loan Positions".length + 200;
+      const MAX_EMBED_CHARS = 5200;
+      const fieldChunks = chunkFieldsBySize(fields, baseSize, MAX_EMBED_CHARS).slice(0, 10);
 
       const embeds = fieldChunks.map((fc, idx) => {
         const e = new EmbedBuilder()
@@ -336,7 +356,14 @@ module.exports = {
         return e;
       });
 
-      await interaction.editReply({ embeds });
+      if (embeds.length === 1) {
+        await interaction.editReply({ embeds });
+      } else {
+        await interaction.editReply({ embeds: [embeds[0]] });
+        for (let i = 1; i < embeds.length; i += 1) {
+          await interaction.followUp({ embeds: [embeds[i]], flags: ephFlags });
+        }
+      }
     } catch (error) {
       logger.error("Error in /my-loans:", error?.stack || error?.message || error);
       try {

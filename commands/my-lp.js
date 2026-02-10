@@ -54,6 +54,19 @@ function fmtUsd(n) {
   return `$${fmt2.format(n)}`;
 }
 
+function computePoolSharePct(liquidityRaw, poolLiquidityRaw) {
+  if (!liquidityRaw || !poolLiquidityRaw) return null;
+  try {
+    const liq = BigInt(liquidityRaw);
+    const pool = BigInt(poolLiquidityRaw);
+    if (pool <= 0n) return null;
+    const bps = (liq * 10000n) / pool; // 2 decimals
+    return Number(bps) / 100;
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("my-lp")
@@ -241,6 +254,11 @@ module.exports = {
           valueLines.push(`Uncollected fees: ${p.join(" + ")}`);
         }
 
+        const poolSharePct = computePoolSharePct(s.liquidity, s.poolLiquidity);
+        if (poolSharePct != null) {
+          valueLines.push(`Pool share: **${poolSharePct.toFixed(2)}%**`);
+        }
+
         if (typeof s.lpPositionFrac === "number") {
           valueLines.push(
             `Position in band: **${(s.lpPositionFrac * 100).toFixed(2)}%** from lower bound`
@@ -263,12 +281,25 @@ module.exports = {
         return { name: header, value };
       });
 
-      const MAX_EMBED_CHARS = 5200;
+      const MAX_EMBED_CHARS = 4800;
       const descText = descLines.join("\n");
       const embeds = [];
       let currentFields = [];
       let currentSize = 0;
       let embedIndex = 0;
+
+      const calcEmbedSize = (e) => {
+        let size = 0;
+        if (e.data?.title) size += e.data.title.length;
+        if (e.data?.description) size += e.data.description.length;
+        if (e.data?.footer?.text) size += e.data.footer.text.length;
+        if (Array.isArray(e.data?.fields)) {
+          for (const f of e.data.fields) {
+            size += (f.name?.length || 0) + (f.value?.length || 0);
+          }
+        }
+        return size;
+      };
 
       const baseSizeFor = (isFirst) =>
         (isFirst ? descText.length : 0) +
@@ -318,7 +349,57 @@ module.exports = {
         `[my-lp] embeds=${embeds.length} totalFields=${fields.length}`
       );
 
-      await interaction.editReply({ embeds });
+      // Safety: ensure no embed exceeds Discord limit
+      const SAFE_LIMIT = 5600;
+      const finalEmbeds = [];
+      for (const e of embeds) {
+        if (calcEmbedSize(e) <= SAFE_LIMIT) {
+          finalEmbeds.push(e);
+          continue;
+        }
+
+        const fields = e.data?.fields || [];
+        const base = new EmbedBuilder()
+          .setColor(e.data?.color ?? "DarkRed")
+          .setTitle(e.data?.title || "My LP Positions")
+          .setTimestamp();
+        if (e.data?.description) base.setDescription(e.data.description);
+        if (e.data?.thumbnail?.url) base.setThumbnail(e.data.thumbnail.url);
+
+        let tmpFields = [];
+        let tmpSize = calcEmbedSize(base);
+        for (const f of fields) {
+          const fSize = (f.name?.length || 0) + (f.value?.length || 0);
+          if (tmpFields.length >= 25 || tmpSize + fSize > SAFE_LIMIT) {
+            const out = EmbedBuilder.from(base);
+            out.addFields(tmpFields);
+            finalEmbeds.push(out);
+            tmpFields = [];
+            tmpSize = calcEmbedSize(base);
+          }
+          tmpFields.push(f);
+          tmpSize += fSize;
+        }
+        if (tmpFields.length) {
+          const out = EmbedBuilder.from(base);
+          out.addFields(tmpFields);
+          finalEmbeds.push(out);
+        }
+      }
+
+      finalEmbeds.forEach((e, i) => {
+        const size = calcEmbedSize(e);
+        logger.debug(`[my-lp] final embed idx=${i} size=${size} fields=${e.data?.fields?.length || 0}`);
+      });
+
+      if (finalEmbeds.length === 1) {
+        await interaction.editReply({ embeds: finalEmbeds });
+      } else {
+        await interaction.editReply({ embeds: [finalEmbeds[0]] });
+        for (let i = 1; i < finalEmbeds.length; i += 1) {
+          await interaction.followUp({ embeds: [finalEmbeds[i]], flags: ephFlags });
+        }
+      }
     } catch (error) {
       logger.error("Error in /my-lp:", error?.stack || error?.message || error);
       try {

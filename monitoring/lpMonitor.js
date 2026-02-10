@@ -609,7 +609,9 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
   let poolAddr = null;
   let currentTick = null;
   let sqrtPriceX96 = null;
+  let poolLiquidity = null;
   let rangeStatus = "UNKNOWN";
+  let pool = null;
 
   try {
     const factoryAddr = await pm.factory();
@@ -618,7 +620,7 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
       poolAddr = await factory.getPool(token0, token1, fee);
 
       if (poolAddr && poolAddr !== ethers.ZeroAddress) {
-        const pool = new ethers.Contract(poolAddr, uniswapV3PoolAbi, provider);
+        pool = new ethers.Contract(poolAddr, uniswapV3PoolAbi, provider);
         const slot0 = await pool.slot0();
 
         const tick = slot0.tick !== undefined ? slot0.tick : slot0[1];
@@ -632,9 +634,26 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
           rangeStatus =
             currentTick >= tickLower && currentTick < tickUpper ? "IN_RANGE" : "OUT_OF_RANGE";
         }
+
+        try {
+          const liq = await pool.liquidity();
+          poolLiquidity = liq != null ? liq.toString() : null;
+        } catch (err) {
+          poolLiquidity = null;
+          logger.debug(
+            `[LP][${chainId}] pool.liquidity() failed tokenId=${tokenId} pool=${poolAddr} ` +
+              `${err?.shortMessage || err?.message || err}`
+          );
+        }
       }
     }
   } catch (_) {}
+
+  if (!poolLiquidity && poolAddr && poolAddr !== ethers.ZeroAddress) {
+    logger.debug(
+      `[LP][${chainId}] pool.liquidity() unavailable tokenId=${tokenId} pool=${poolAddr}`
+    );
+  }
 
   const lpClass = classifyLpRangeTier(rangeStatus, tickLower, tickUpper, currentTick);
   const currentPrice = Number.isFinite(currentTick) ? tickToPrice(currentTick) : null;
@@ -683,7 +702,21 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
   try {
     const bothZero = (fee0Raw === "0" && fee1Raw === "0");
     if ((bothZero || !simWorked) && poolAddr && Number.isFinite(currentTick)) {
-      const pool = new ethers.Contract(poolAddr, uniswapV3PoolAbi, provider);
+      if (!pool) {
+        pool = new ethers.Contract(poolAddr, uniswapV3PoolAbi, provider);
+      }
+      if (poolLiquidity == null) {
+        try {
+          const liq = await pool.liquidity();
+          poolLiquidity = liq != null ? liq.toString() : null;
+        } catch (err) {
+          poolLiquidity = null;
+          logger.debug(
+            `[LP][${chainId}] pool.liquidity() fallback failed tokenId=${tokenId} pool=${poolAddr} ` +
+              `${err?.shortMessage || err?.message || err}`
+          );
+        }
+      }
 
       const MAX_UINT256 = (1n << 256n) - 1n;
       const SANE_MAX = 1n << 255n;
@@ -728,7 +761,8 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
   logger.debug(
     `[LP][${chainId}] fee source=${feeSource} tokenId=${tokenId} ` +
       `pool=${poolAddr || "n/a"} tick=${Number.isFinite(currentTick) ? currentTick : "n/a"} ` +
-      `fees0=${fees0 ?? "n/a"} fees1=${fees1 ?? "n/a"}`
+      `fees0=${fees0 ?? "n/a"} fees1=${fees1 ?? "n/a"} ` +
+      `poolLiq=${poolLiquidity ?? "n/a"} posLiq=${liquidity?.toString?.() || liquidity || "n/a"}`
   );
   logger.debug(
     `[LP][${chainId}] fee debug tokenId=${tokenId} tickLower=${tickLower} tickUpper=${tickUpper} ` +
@@ -767,6 +801,7 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
     status: "ACTIVE",
     rangeStatus,
     poolAddr,
+    poolLiquidity,
 
     amount0,
     amount1,
