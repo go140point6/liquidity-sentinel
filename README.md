@@ -29,7 +29,7 @@ Total LP pool-share by DEX/pair across all tracked wallets and positions, includ
 <img src="img/my-pool-share.png" alt="/my-pool-share screenshot" width="720">
 
 ### /my-wallets
-Tracked wallets and linked positions, built for a quick coverage check. Includes an LP alert flag to suppress tier-only updates so you only get in-range/out-of-range changes when preferred.
+Tracked wallets and linked positions, built for a quick coverage check. Includes an LP alert flag to suppress tier-only updates so you only get in-range/out-of-range changes when preferred, plus per-user daily heartbeat schedule settings (hour + timezone, with heartbeat enable/disable).
 
 <img src="img/my-wallets.png" alt="/my-wallets screenshot" width="720">
 
@@ -56,6 +56,7 @@ Stateful alerting for liquidation/redemption thresholds and position risk change
 ### Daily heartbeat DM
 A daily summary DM with tracked positions, current status, and key liquidity/health signals.
 Includes a total LP pool-share summary by DEX/pair across your tracked wallets.
+Delivery time is user-configurable from `/my-wallets` (hour + timezone).
 
 <img src="img/daily-heartbeat.png" alt="Daily heartbeat screenshot" width="720">
 
@@ -66,6 +67,7 @@ Includes a total LP pool-share summary by DEX/pair across your tracked wallets.
 - Scheduled scanning so positions stay fresh in near-realtime.
 - Multi-chain RPC support with strict environment validation.
 - Lightweight custom logger for consistent, controllable output.
+- Optional Firelight vault-capacity signal channel with reaction-based DM subscription.
 
 ---
 

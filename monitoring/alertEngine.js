@@ -521,10 +521,19 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
           ? { text: "OOR", emoji: "🔴" }
           : { text: "UNK", emoji: "⚪" };
       const tierU = (newTier || "UNKNOWN").toString().toUpperCase();
+      const pairText =
+        meta?.pairLabel ||
+        `${meta?.token0Symbol || meta?.token0 || "?"}-${meta?.token1Symbol || meta?.token1 || "?"}`;
+      const trendArrow =
+        headline.text === "Improving"
+          ? "↗️"
+          : headline.text === "Worsening"
+          ? "↘️"
+          : "→";
 
       const embed = new EmbedBuilder()
         .setTitle(`LP Alert - ${statusShort.emoji} ${statusShort.text} ${tierEmoji(tierU)} ${tierU}`)
-        .setDescription(`${meta?.protocol || "LP"} (${headline.text.toLowerCase()})`)
+        .setDescription(`${pairText} ${trendArrow} ${meta?.protocol || "LP"}`)
         .setColor(alertColor)
         .setTimestamp();
 
