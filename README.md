@@ -23,6 +23,11 @@ Uniswap v3 LP positions with range status, estimated amounts from liquidity, and
 
 <img src="img/my-lp.png" alt="/my-lp screenshot" width="720">
 
+### /my-pool-share
+Total LP pool-share by DEX/pair across all tracked wallets and positions, including snapshot freshness context.
+
+<img src="img/my-pool-share.png" alt="/my-pool-share screenshot" width="720">
+
 ### /my-wallets
 Tracked wallets and linked positions, built for a quick coverage check. Includes an LP alert flag to suppress tier-only updates so you only get in-range/out-of-range changes when preferred.
 
@@ -50,6 +55,7 @@ Stateful alerting for liquidation/redemption thresholds and position risk change
 
 ### Daily heartbeat DM
 A daily summary DM with tracked positions, current status, and key liquidity/health signals.
+Includes a total LP pool-share summary by DEX/pair across your tracked wallets.
 
 <img src="img/daily-heartbeat.png" alt="Daily heartbeat screenshot" width="720">
 
