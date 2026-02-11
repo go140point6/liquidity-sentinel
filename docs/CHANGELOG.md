@@ -36,6 +36,7 @@ All notable, user-facing changes are documented here.
 ### Added
 - Per-user daily heartbeat schedule with timezone selection (defaults to 3 AM America/Los_Angeles).
 - Daily heartbeat now includes a “Total LP Pool Share” summary by pool/DEX.
+- `/my-pool-share` command to view total LP pool-share by DEX/pair across tracked wallets/positions.
 
 ### Changed
 - `/my-lp` shows per-position pool share percentages.
