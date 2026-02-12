@@ -7,15 +7,19 @@
           "key": "enosys_lp",
           "protocol": "ENOSYS_LP",
           "contract": "0xD9770b1C7A6ccd33C75b5bcB1c0078f46bE46657",
-          "csvFile": "enosys_lp_positions.csv",
           "default_start_block": 29989000
         },
         {
           "key": "sparkdex_lp",
           "protocol": "SPARKDEX_LP",
           "contract": "0xEE5FF5Bc5F852764b5584d92A4d592A53DC527da",
-          "csvFile": "sparkdex_lp_positions.csv",
           "default_start_block": 30760000
+        },
+        {
+          "key": "sparkdex_lp_v4",
+          "protocol": "SPARKDEX_LP_V4",
+          "contract": "0x49BE8AA6c684b15e0C5450e8Fa0b16Bec1435596",
+          "default_start_block": 54496000
         }
       ]
     },
@@ -26,7 +30,6 @@
           "key": "xswap_lp",
           "protocol": "XSWAP_LP",
           "contract": "0x6D22833398772D7Da9A7cBCFdEE98342cCE154D4",
-          "csvFile": "xswap_lp_positions.csv",
           "default_start_block": 59795000
         }
       ]

@@ -4,6 +4,15 @@ All notable, user-facing changes are documented here.
 
 ---
 
+## [2026-02-12]
+
+### Added
+- SparkDEX v4 LP contract support on FLR (`SPARKDEX_LP_V4`), including Algebra-style pool discovery/state reads for range and pool-share calculations.
+
+### Changed
+- LP monitoring/command debug output was cleaned up (less noisy logs, no behavior change).
+- LP contract config cleanup: removed legacy `csvFile` entries from `data/lp_contracts.json`.
+
 ## [2026-01-29]
 
 ### Changed
