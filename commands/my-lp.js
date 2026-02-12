@@ -327,16 +327,10 @@ module.exports = {
       currentSize = baseSizeFor(true);
       for (const f of fields) {
         const size = fieldSize(f);
-        logger.debug(
-          `[my-lp] field size name=${f.name?.length || 0} value=${f.value?.length || 0} total=${size}`
-        );
         if (
           currentFields.length >= 25 ||
           currentSize + size > MAX_EMBED_CHARS
         ) {
-          logger.debug(
-            `[my-lp] flushing embed idx=${embedIndex} fields=${currentFields.length} size=${currentSize}`
-          );
           flushEmbed(embedIndex === 0);
           embedIndex += 1;
           currentSize = baseSizeFor(false);
@@ -345,9 +339,6 @@ module.exports = {
         currentSize += size;
       }
       flushEmbed(embedIndex === 0);
-      logger.debug(
-        `[my-lp] embeds=${embeds.length} totalFields=${fields.length}`
-      );
 
       // Safety: ensure no embed exceeds Discord limit
       const SAFE_LIMIT = 5600;
@@ -386,11 +377,6 @@ module.exports = {
           finalEmbeds.push(out);
         }
       }
-
-      finalEmbeds.forEach((e, i) => {
-        const size = calcEmbedSize(e);
-        logger.debug(`[my-lp] final embed idx=${i} size=${size} fields=${e.data?.fields?.length || 0}`);
-      });
 
       if (finalEmbeds.length === 1) {
         await interaction.editReply({ embeds: finalEmbeds });

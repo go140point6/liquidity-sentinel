@@ -20,6 +20,74 @@ const uniswapV3PoolAbi = require("../abi/uniswapV3Pool.json");
 const erc20MetadataAbi = require("../abi/erc20Metadata.json");
 const JSBI = require("jsbi");
 const { TickMath, SqrtPriceMath } = require("@uniswap/v3-sdk");
+const algebraFactoryAbi = [
+  {
+    inputs: [
+      { internalType: "address", name: "tokenA", type: "address" },
+      { internalType: "address", name: "tokenB", type: "address" },
+    ],
+    name: "poolByPair",
+    outputs: [{ internalType: "address", name: "pool", type: "address" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [
+      { internalType: "address", name: "tokenA", type: "address" },
+      { internalType: "address", name: "tokenB", type: "address" },
+    ],
+    name: "getPool",
+    outputs: [{ internalType: "address", name: "pool", type: "address" }],
+    stateMutability: "view",
+    type: "function",
+  },
+];
+const algebraPoolAbi = [
+  {
+    inputs: [],
+    name: "globalState",
+    outputs: [
+      { internalType: "uint160", name: "price", type: "uint160" },
+      { internalType: "int24", name: "tick", type: "int24" },
+      { internalType: "uint16", name: "fee", type: "uint16" },
+      { internalType: "uint16", name: "timepointIndex", type: "uint16" },
+      { internalType: "uint8", name: "communityFeeToken0", type: "uint8" },
+      { internalType: "uint8", name: "communityFeeToken1", type: "uint8" },
+      { internalType: "bool", name: "unlocked", type: "bool" },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [],
+    name: "liquidity",
+    outputs: [{ internalType: "uint128", name: "", type: "uint128" }],
+    stateMutability: "view",
+    type: "function",
+  },
+];
+
+function parseSignedIntN(hexWord, bits) {
+  const raw = BigInt(`0x${hexWord}`);
+  return Number(BigInt.asIntN(bits, raw));
+}
+
+async function readAlgebraGlobalState(provider, poolAddr) {
+  const selector = "0xe76c01e4"; // globalState()
+  const ret = await provider.call({ to: poolAddr, data: selector });
+  if (!ret || ret === "0x") {
+    throw new Error("globalState returned empty");
+  }
+  const hex = String(ret).replace(/^0x/, "");
+  if (hex.length < 128) {
+    throw new Error(`globalState returned too short payload (${hex.length} hex chars)`);
+  }
+  const w0 = hex.slice(0, 64);   // price (uint160)
+  const w1 = hex.slice(64, 128); // tick (int24 in low bits)
+  const price = BigInt(`0x${w0}`);
+  const tick = parseSignedIntN(w1, 24);
+  return { price, tick };
+}
 
 const { getDb } = require("../db");
 const { getProviderForChain } = require("../utils/ethers/providers");
@@ -611,20 +679,60 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
   let sqrtPriceX96 = null;
   let poolLiquidity = null;
   let rangeStatus = "UNKNOWN";
-  let pool = null;
+  let poolReader = null;
+  const isAlgebraProtocol = String(protocol || "").toUpperCase().includes("_V4");
 
   try {
     const factoryAddr = await pm.factory();
-    if (factoryAddr && factoryAddr !== ethers.ZeroAddress) {
+    if (!factoryAddr || factoryAddr === ethers.ZeroAddress) {
+      logger.debug(
+        `[LP][${chainId}] factory missing/zero tokenId=${tokenId} protocol=${protocol}`
+      );
+    } else {
       const factory = new ethers.Contract(factoryAddr, uniswapV3FactoryAbi, provider);
-      poolAddr = await factory.getPool(token0, token1, fee);
-
-      if (poolAddr && poolAddr !== ethers.ZeroAddress) {
-        pool = new ethers.Contract(poolAddr, uniswapV3PoolAbi, provider);
-        const slot0 = await pool.slot0();
-
-        const tick = slot0.tick !== undefined ? slot0.tick : slot0[1];
-        const sp = slot0.sqrtPriceX96 !== undefined ? slot0.sqrtPriceX96 : slot0[0];
+      try {
+        poolAddr = await factory.getPool(token0, token1, fee);
+      } catch (_) {}
+      if (!poolAddr || poolAddr === ethers.ZeroAddress) {
+        const algFactory = new ethers.Contract(factoryAddr, algebraFactoryAbi, provider);
+        try {
+          poolAddr = await algFactory.poolByPair(token0, token1);
+        } catch (_) {}
+        if (!poolAddr || poolAddr === ethers.ZeroAddress) {
+          try {
+            poolAddr = await algFactory.getPool(token0, token1);
+          } catch (_) {}
+        }
+      }
+      if (!poolAddr || poolAddr === ethers.ZeroAddress) {
+        logger.debug(
+          `[LP][${chainId}] getPool returned zero tokenId=${tokenId} protocol=${protocol} ` +
+            `factory=${factoryAddr} token0=${token0} token1=${token1} fee=${fee}`
+        );
+      } else {
+        let tick;
+        let sp;
+        if (isAlgebraProtocol) {
+          const algPool = new ethers.Contract(poolAddr, algebraPoolAbi, provider);
+          poolReader = algPool;
+          const gs = await readAlgebraGlobalState(provider, poolAddr);
+          tick = gs.tick;
+          sp = gs.price;
+        } else {
+          const v3Pool = new ethers.Contract(poolAddr, uniswapV3PoolAbi, provider);
+          poolReader = v3Pool;
+          try {
+            const slot0 = await v3Pool.slot0();
+            tick = slot0.tick !== undefined ? slot0.tick : slot0[1];
+            sp = slot0.sqrtPriceX96 !== undefined ? slot0.sqrtPriceX96 : slot0[0];
+          } catch (_) {
+            const algPool = new ethers.Contract(poolAddr, algebraPoolAbi, provider);
+            poolReader = algPool;
+            const gs = await readAlgebraGlobalState(provider, poolAddr);
+            tick = gs.tick;
+            sp = gs.price;
+          }
+        }
 
         currentTick = Number(tick);
         sqrtPriceX96 = sp ? sp.toString() : null;
@@ -633,10 +741,15 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
           currentTick = applyLpTickShift(currentTick, tickLower, tickUpper);
           rangeStatus =
             currentTick >= tickLower && currentTick < tickUpper ? "IN_RANGE" : "OUT_OF_RANGE";
+        } else {
+          logger.debug(
+            `[LP][${chainId}] slot0 tick invalid tokenId=${tokenId} protocol=${protocol} ` +
+              `pool=${poolAddr} tick=${String(tick)}`
+          );
         }
 
         try {
-          const liq = await pool.liquidity();
+          const liq = await poolReader.liquidity();
           poolLiquidity = liq != null ? liq.toString() : null;
         } catch (err) {
           poolLiquidity = null;
@@ -647,7 +760,12 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
         }
       }
     }
-  } catch (_) {}
+  } catch (err) {
+    logger.debug(
+      `[LP][${chainId}] pool discovery failed tokenId=${tokenId} protocol=${protocol} ` +
+        `${err?.shortMessage || err?.message || err}`
+    );
+  }
 
   if (!poolLiquidity && poolAddr && poolAddr !== ethers.ZeroAddress) {
     logger.debug(
@@ -702,12 +820,13 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
   try {
     const bothZero = (fee0Raw === "0" && fee1Raw === "0");
     if ((bothZero || !simWorked) && poolAddr && Number.isFinite(currentTick)) {
-      if (!pool) {
-        pool = new ethers.Contract(poolAddr, uniswapV3PoolAbi, provider);
+      let feePool = poolReader;
+      if (!feePool) {
+        feePool = new ethers.Contract(poolAddr, uniswapV3PoolAbi, provider);
       }
       if (poolLiquidity == null) {
         try {
-          const liq = await pool.liquidity();
+          const liq = await feePool.liquidity();
           poolLiquidity = liq != null ? liq.toString() : null;
         } catch (err) {
           poolLiquidity = null;
@@ -731,7 +850,7 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
       }
 
       const computed = await computeFeesOwedFromPool({
-        pool,
+        pool: feePool,
         currentTick,
         tickLower,
         tickUpper,
@@ -1025,6 +1144,7 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
   let poolAddr = null;
   let currentTick = null;
   let sqrtPriceX96 = null;
+  const isAlgebraProtocol = String(protocol || "").toUpperCase().includes("_V4");
 
   const tickToPrice = (tick) => {
     if (!Number.isFinite(tick)) return null;
@@ -1037,15 +1157,51 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
 
   try {
     const factoryAddr = await pm.factory();
-    if (factoryAddr && factoryAddr !== ethers.ZeroAddress) {
+    if (!factoryAddr || factoryAddr === ethers.ZeroAddress) {
+      logger.debug(
+        `[LP][${chainId}] describe: factory missing/zero tokenId=${tokenId} protocol=${protocol}`
+      );
+    } else {
       const factory = new ethers.Contract(factoryAddr, uniswapV3FactoryAbi, provider);
-      poolAddr = await factory.getPool(token0, token1, fee);
+      try {
+        poolAddr = await factory.getPool(token0, token1, fee);
+      } catch (_) {}
+      if (!poolAddr || poolAddr === ethers.ZeroAddress) {
+        const algFactory = new ethers.Contract(factoryAddr, algebraFactoryAbi, provider);
+        try {
+          poolAddr = await algFactory.poolByPair(token0, token1);
+        } catch (_) {}
+        if (!poolAddr || poolAddr === ethers.ZeroAddress) {
+          try {
+            poolAddr = await algFactory.getPool(token0, token1);
+          } catch (_) {}
+        }
+      }
 
-      if (poolAddr && poolAddr !== ethers.ZeroAddress) {
-        const pool = new ethers.Contract(poolAddr, uniswapV3PoolAbi, provider);
-        const slot0 = await pool.slot0();
-        const tick = slot0.tick !== undefined ? slot0.tick : slot0[1];
-        const sp = slot0.sqrtPriceX96 !== undefined ? slot0.sqrtPriceX96 : slot0[0];
+      if (!poolAddr || poolAddr === ethers.ZeroAddress) {
+        logger.debug(
+          `[LP][${chainId}] describe: getPool returned zero tokenId=${tokenId} protocol=${protocol} ` +
+            `factory=${factoryAddr} token0=${token0} token1=${token1} fee=${fee}`
+        );
+      } else {
+        let tick;
+        let sp;
+        if (isAlgebraProtocol) {
+          const gs = await readAlgebraGlobalState(provider, poolAddr);
+          tick = gs.tick;
+          sp = gs.price;
+        } else {
+          const pool = new ethers.Contract(poolAddr, uniswapV3PoolAbi, provider);
+          try {
+            const slot0 = await pool.slot0();
+            tick = slot0.tick !== undefined ? slot0.tick : slot0[1];
+            sp = slot0.sqrtPriceX96 !== undefined ? slot0.sqrtPriceX96 : slot0[0];
+          } catch (_) {
+            const gs = await readAlgebraGlobalState(provider, poolAddr);
+            tick = gs.tick;
+            sp = gs.price;
+          }
+        }
         currentTick = Number(tick);
         sqrtPriceX96 = sp ? sp.toString() : null;
 
@@ -1054,6 +1210,11 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
           currentPrice = tickToPrice(currentTick);
           currentStatus =
             currentTick >= tickLower && currentTick < tickUpper ? "IN_RANGE" : "OUT_OF_RANGE";
+        } else {
+          logger.debug(
+            `[LP][${chainId}] describe: slot0 tick invalid tokenId=${tokenId} protocol=${protocol} ` +
+              `pool=${poolAddr} tick=${String(tick)}`
+          );
         }
       }
     }
@@ -1061,6 +1222,10 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
     logger.warn(
       `  Could not compute range for LP token ${tokenId} (${protocol}):`,
       err?.message || err
+    );
+    logger.debug(
+      `[LP][${chainId}] describe: pool discovery failed tokenId=${tokenId} protocol=${protocol} ` +
+        `${err?.shortMessage || err?.message || err}`
     );
   }
 
