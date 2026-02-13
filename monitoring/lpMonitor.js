@@ -1,7 +1,9 @@
 // monitoring/lpMonitor.js
 //
 // DB-driven LP monitor (NEW SCHEMA):
-// - Reads LP positions via (user_wallets + contracts(kind=LP_NFT) + nft_tokens current owner)
+// - Reads LP positions via:
+//   - NFT LPs: (user_wallets + contracts(kind=LP_NFT) + nft_tokens current owner)
+//   - ALM LPs: (user_wallets + contracts(kind=LP_ALM))
 // - Uses lp_token_meta.pair_label when available
 // - Persists previous range status in alert_state.state_json (via alertEngine) - no extra tables
 // - Provider endpoints come from .env (FLR_MAINNET, XDC_MAINNET, etc.)
@@ -66,6 +68,15 @@ const algebraPoolAbi = [
     type: "function",
   },
 ];
+const steerPeripheryAbi = [
+  "function algebraVaultDetailsByAddress(address vault) view returns ((string vaultType,address token0,address token1,string name,string symbol,uint256 decimals,string token0Name,string token1Name,string token0Symbol,string token1Symbol,uint256 token0Decimals,uint256 token1Decimals,uint256 totalLPTokensIssued,uint256 token0Balance,uint256 token1Balance,address vaultCreator) details)",
+  "function vaultDetailsByAddress(address vault) view returns ((string vaultType,address token0,address token1,string name,string symbol,uint256 decimals,string token0Name,string token1Name,string token0Symbol,string token1Symbol,uint256 token0Decimals,uint256 token1Decimals,uint256 feeTier,uint256 totalLPTokensIssued,uint256 token0Balance,uint256 token1Balance,address vaultCreator) details)",
+  "function vaultBalancesByAddressWithFees(address vault) returns ((uint256 amountToken0,uint256 amountToken1) balances)",
+];
+const steerVaultErc20Abi = [
+  "function balanceOf(address account) view returns (uint256)",
+  "function totalSupply() view returns (uint256)",
+];
 
 function parseSignedIntN(hexWord, bits) {
   const raw = BigInt(`0x${hexWord}`);
@@ -92,6 +103,7 @@ async function readAlgebraGlobalState(provider, poolAddr) {
 const { getDb } = require("../db");
 const { getProviderForChain } = require("../utils/ethers/providers");
 const { acquireLock, releaseLock } = require("../utils/lock");
+const { getAlmPeripheryAddress } = require("../utils/almConfig");
 const { handleLpRangeAlert } = require("./alertEngine");
 const { applyLpTickShift, logRunApplied } = require("./testOffsets");
 const logger = require("../utils/logger");
@@ -177,6 +189,7 @@ const LP_OUT_WARN_FRAC = Number(process.env.LP_OUT_WARN_FRAC);
 const LP_OUT_HIGH_FRAC = Number(process.env.LP_OUT_HIGH_FRAC);
 const SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SNAPSHOT_STALE_WARN_MIN");
 const SNAPSHOT_LOCK_NAME = "snapshot-refresh";
+const ALM_ROLLING_24H_MS = 24 * 60 * 60 * 1000;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -475,6 +488,7 @@ function getMonitoredLpRows(userId = null) {
       u.id                 AS userId,
       uw.id                AS walletId,
       c.id                 AS contractId,
+      c.kind               AS contractKind,
 
       c.chain_id           AS chainId,
       c.protocol           AS protocol,
@@ -518,10 +532,201 @@ function getMonitoredLpRows(userId = null) {
       AND c.is_enabled = 1
       AND (? IS NULL OR u.id = ?)
       AND pi.id IS NULL
-    ORDER BY c.chain_id, c.protocol, uw.address_eip55, nt.token_id
+    UNION ALL
+    SELECT
+      u.id                 AS userId,
+      uw.id                AS walletId,
+      c.id                 AS contractId,
+      c.kind               AS contractKind,
+
+      c.chain_id           AS chainId,
+      c.protocol           AS protocol,
+
+      uw.address_eip55     AS owner,
+      uw.label             AS walletLabel,
+      uw.lp_alerts_status_only AS lpStatusOnly,
+      c.address_eip55      AS contract,
+
+      c.address_lower      AS tokenId,
+      NULL                 AS pairLabel,
+
+      ast.state_json       AS prevStateJson
+    FROM user_wallets uw
+    JOIN users u
+      ON u.id = uw.user_id
+    JOIN contracts c
+      ON c.chain_id = uw.chain_id
+     AND c.kind = 'LP_ALM'
+    LEFT JOIN alert_state ast
+      ON ast.user_id     = u.id
+     AND ast.wallet_id   = uw.id
+     AND ast.contract_id = c.id
+     AND ast.token_id    = c.address_lower
+     AND ast.alert_type  = 'LP_RANGE'
+    LEFT JOIN position_ignores pi
+      ON pi.user_id        = u.id
+     AND pi.position_kind  = 'LP'
+     AND pi.wallet_id      = uw.id
+     AND pi.contract_id    = c.id
+     AND (pi.token_id IS NULL OR pi.token_id = c.address_lower)
+    WHERE
+      uw.is_enabled = 1
+      AND c.is_enabled = 1
+      AND (? IS NULL OR u.id = ?)
+      AND pi.id IS NULL
+    ORDER BY chainId, protocol, owner, tokenId
   `;
 
-  return db.prepare(sql).all(userId, userId);
+  return db.prepare(sql).all(userId, userId, userId, userId);
+}
+
+function getSteerPeripheryAddress(chainId) {
+  return getAlmPeripheryAddress(chainId);
+}
+
+async function loadSteerVaultBase(provider, chainId, vaultAddr, cache = null) {
+  const key = `${String(chainId || "").toUpperCase()}:${String(vaultAddr || "").toLowerCase()}`;
+  if (cache && cache.has(key)) return cache.get(key);
+
+  const peripheryAddr = getSteerPeripheryAddress(chainId);
+  if (!peripheryAddr) {
+    throw new Error(`Missing Steer periphery address for chain ${chainId} (check data/alm_contracts.json)`);
+  }
+
+  const periphery = new ethers.Contract(peripheryAddr, steerPeripheryAbi, provider);
+  const vaultToken = new ethers.Contract(vaultAddr, steerVaultErc20Abi, provider);
+
+  let details;
+  let detailSource = "algebraVaultDetailsByAddress";
+  try {
+    details = await periphery.algebraVaultDetailsByAddress(vaultAddr);
+  } catch (_) {
+    detailSource = "vaultDetailsByAddress";
+    details = await periphery.vaultDetailsByAddress(vaultAddr);
+  }
+
+  let balancesWithFees = null;
+  try {
+    balancesWithFees = await periphery.vaultBalancesByAddressWithFees.staticCall(vaultAddr);
+  } catch (_) {}
+
+  let totalSupplyRaw = details.totalLPTokensIssued != null ? BigInt(details.totalLPTokensIssued) : null;
+  if (!(totalSupplyRaw > 0n)) {
+    try {
+      totalSupplyRaw = BigInt(await vaultToken.totalSupply());
+    } catch (_) {
+      totalSupplyRaw = 0n;
+    }
+  }
+
+  const out = {
+    detailSource,
+    details,
+    balancesWithFees,
+    totalSupplyRaw,
+    vaultToken,
+  };
+  if (cache) cache.set(key, out);
+  return out;
+}
+
+async function summarizeSteerAlmPosition(provider, chainId, protocol, row, options = {}) {
+  const { cache = null } = options;
+  const {
+    userId,
+    walletId,
+    contractId,
+    contract: vaultAddr,
+    owner,
+    tokenId,
+    pairLabel: dbPairLabel,
+    walletLabel,
+  } = row;
+
+  const {
+    details,
+    balancesWithFees,
+    totalSupplyRaw,
+    vaultToken,
+  } = await loadSteerVaultBase(provider, chainId, vaultAddr, cache);
+
+  const userSharesRaw = BigInt(await vaultToken.balanceOf(owner));
+  const shareActive = userSharesRaw > 0n && totalSupplyRaw > 0n;
+
+  const token0Symbol = details.token0Symbol || details.token0;
+  const token1Symbol = details.token1Symbol || details.token1;
+  const token0 = details.token0;
+  const token1 = details.token1;
+  const dec0 = Number(details.token0Decimals || 18);
+  const dec1 = Number(details.token1Decimals || 18);
+
+  const base0Raw = BigInt(details.token0Balance || 0);
+  const base1Raw = BigInt(details.token1Balance || 0);
+  const withFees0Raw = balancesWithFees?.amountToken0 != null ? BigInt(balancesWithFees.amountToken0) : null;
+  const withFees1Raw = balancesWithFees?.amountToken1 != null ? BigInt(balancesWithFees.amountToken1) : null;
+  const feeDelta0Raw = withFees0Raw != null && withFees0Raw > base0Raw ? withFees0Raw - base0Raw : 0n;
+  const feeDelta1Raw = withFees1Raw != null && withFees1Raw > base1Raw ? withFees1Raw - base1Raw : 0n;
+
+  const user0Raw = shareActive ? (userSharesRaw * base0Raw) / totalSupplyRaw : 0n;
+  const user1Raw = shareActive ? (userSharesRaw * base1Raw) / totalSupplyRaw : 0n;
+  const userFee0Raw = shareActive ? (userSharesRaw * feeDelta0Raw) / totalSupplyRaw : 0n;
+  const userFee1Raw = shareActive ? (userSharesRaw * feeDelta1Raw) / totalSupplyRaw : 0n;
+
+  const amount0 = Number(ethers.formatUnits(user0Raw, dec0));
+  const amount1 = Number(ethers.formatUnits(user1Raw, dec1));
+  const fees0 = Number(ethers.formatUnits(userFee0Raw, dec0));
+  const fees1 = Number(ethers.formatUnits(userFee1Raw, dec1));
+  const sharePct =
+    totalSupplyRaw > 0n ? (Number((userSharesRaw * 10000n) / totalSupplyRaw) / 100) : null;
+
+  const pairLabel = dbPairLabel || `${token0Symbol}-${token1Symbol}`;
+
+  const out = {
+    positionModel: "ALM",
+    userId,
+    walletId,
+    contractId,
+    protocol,
+    chainId,
+    owner,
+    walletLabel,
+    tokenId: String(tokenId || vaultAddr).toLowerCase(),
+    nftContract: vaultAddr,
+    token0,
+    token1,
+    token0Symbol,
+    token1Symbol,
+    pairLabel,
+    fee: null,
+    tickLower: null,
+    tickUpper: null,
+    currentTick: null,
+    liquidity: userSharesRaw.toString(),
+    status: shareActive ? "ACTIVE" : "INACTIVE",
+    rangeStatus: shareActive ? "IN_RANGE" : "INACTIVE",
+    poolAddr: vaultAddr,
+    poolLiquidity: totalSupplyRaw.toString(),
+    amount0,
+    amount1,
+    fees0,
+    fees1,
+    lpRangeTier: shareActive ? "LOW" : "UNKNOWN",
+    lpRangeLabel: shareActive ? "managed ALM vault position." : "inactive",
+    lpPositionFrac: null,
+    lpDistanceFrac: null,
+    dec0,
+    dec1,
+    priceLower: null,
+    priceUpper: null,
+    currentPrice: null,
+    priceBaseSymbol: token0Symbol,
+    priceQuoteSymbol: token1Symbol,
+    sourceDetail: details.vaultType || null,
+    almSharePct: sharePct,
+    vaultTotalAmount0: Number(ethers.formatUnits(base0Raw, dec0)),
+    vaultTotalAmount1: Number(ethers.formatUnits(base1Raw, dec1)),
+  };
+  return attachAlmRolling24h(out, row);
 }
 
 let _lpSnapshotStmt = null;
@@ -567,6 +772,93 @@ function cleanupLpSnapshots(runId) {
   if (!runId) return;
   const db = getDb();
   db.prepare(`DELETE FROM lp_position_snapshots WHERE snapshot_run_id != ?`).run(runId);
+}
+
+function toFiniteNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseSnapshotMs(raw) {
+  if (!raw) return NaN;
+  const s = String(raw);
+  const iso = s.includes("T") ? s : s.replace(" ", "T");
+  return Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
+}
+
+function computePoolSharePct(liquidityRaw, poolLiquidityRaw) {
+  if (!liquidityRaw || !poolLiquidityRaw) return null;
+  try {
+    const liq = BigInt(liquidityRaw);
+    const pool = BigInt(poolLiquidityRaw);
+    if (pool <= 0n) return null;
+    const bps = (liq * 10000n) / pool;
+    return Number(bps) / 100;
+  } catch {
+    return null;
+  }
+}
+
+function attachAlmRolling24h(summary, row) {
+  if (!summary || summary.positionModel !== "ALM" || !row) return summary;
+  const prev = getLpSnapshot({
+    userId: row.userId,
+    walletId: row.walletId,
+    contractId: row.contractId,
+    tokenId: row.tokenId,
+  });
+  if (!prev || prev.positionModel !== "ALM") return summary;
+
+  const nowMs = Date.now();
+  const prevMs = parseSnapshotMs(prev.snapshotAt);
+
+  let baseline = prev.alm24hBaseline || null;
+  let baselineMs = parseSnapshotMs(baseline?.snapshotAt);
+
+  if (!baseline || !Number.isFinite(baselineMs) || nowMs - baselineMs > ALM_ROLLING_24H_MS * 2) {
+    if (Number.isFinite(prevMs)) {
+      baseline = {
+        snapshotAt: prev.snapshotAt,
+        amount0: toFiniteNumber(prev.amount0),
+        amount1: toFiniteNumber(prev.amount1),
+        sharePct: computePoolSharePct(prev.liquidity, prev.poolLiquidity),
+      };
+      baselineMs = prevMs;
+    } else {
+      baseline = null;
+      baselineMs = NaN;
+    }
+  }
+
+  if (baseline && Number.isFinite(baselineMs) && nowMs - baselineMs >= ALM_ROLLING_24H_MS) {
+    if (Number.isFinite(prevMs) && prevMs > baselineMs) {
+      baseline = {
+        snapshotAt: prev.snapshotAt,
+        amount0: toFiniteNumber(prev.amount0),
+        amount1: toFiniteNumber(prev.amount1),
+        sharePct: computePoolSharePct(prev.liquidity, prev.poolLiquidity),
+      };
+      baselineMs = prevMs;
+    }
+  }
+
+  if (baseline && Number.isFinite(baselineMs)) {
+    summary.alm24hBaseline = baseline;
+    const curr0 = toFiniteNumber(summary.amount0);
+    const curr1 = toFiniteNumber(summary.amount1);
+    const currShare = computePoolSharePct(summary.liquidity, summary.poolLiquidity);
+    summary.alm24h = {
+      hours: (nowMs - baselineMs) / (60 * 60 * 1000),
+      deltaAmount0:
+        curr0 != null && baseline.amount0 != null ? curr0 - Number(baseline.amount0) : null,
+      deltaAmount1:
+        curr1 != null && baseline.amount1 != null ? curr1 - Number(baseline.amount1) : null,
+      deltaSharePp:
+        currShare != null && baseline.sharePct != null ? currShare - Number(baseline.sharePct) : null,
+    };
+  }
+
+  return summary;
 }
 
 function extractPrevRangeStatus(prevStateJson) {
@@ -984,6 +1276,7 @@ async function refreshLpSnapshots() {
     return p;
   };
 
+  const steerCache = new Map();
   for (const row of rows) {
     const chainId = (row.chainId || "").toUpperCase();
     let provider;
@@ -995,12 +1288,21 @@ async function refreshLpSnapshots() {
     }
 
     try {
-      const summary = await summarizeLpPosition(
-        provider,
-        chainId,
-        row.protocol || "UNKNOWN_PROTOCOL",
-        row
-      );
+      const summary =
+        row.contractKind === "LP_ALM"
+          ? await summarizeSteerAlmPosition(
+              provider,
+              chainId,
+              row.protocol || "UNKNOWN_PROTOCOL",
+              row,
+              { cache: steerCache }
+            )
+          : await summarizeLpPosition(
+              provider,
+              chainId,
+              row.protocol || "UNKNOWN_PROTOCOL",
+              row
+            );
       if (summary) {
         upsertLpSnapshot(summary, runId);
         ok += 1;
@@ -1401,6 +1703,17 @@ async function describeLpFromSnapshot(row, snapshot, options = {}) {
   const prevStatus = extractPrevRangeStatus(row.prevStateJson);
   const snapshotAt = snapshot.snapshotAt || null;
 
+  if (snapshot.positionModel === "ALM") {
+    // ALM positions are currently informational only (commands + heartbeat).
+    // They should not emit LP range/tier alerts.
+    if (verbose) {
+      logger.debug(
+        `[LP] ALM alerting skipped protocol=${protocol || "UNKNOWN_PROTOCOL"} token=${tokenId}`
+      );
+    }
+    return;
+  }
+
   const tickLower = Number(snapshot.tickLower);
   const tickUpper = Number(snapshot.tickUpper);
   const baseTick = Number(snapshot.currentTick);
@@ -1530,6 +1843,7 @@ async function monitorLPs(options = {}) {
   let snapshotCount = 0;
   let rpcCount = 0;
   let rpcLockPath = null;
+  let snapshotLockBusy = false;
 
   const rows = getMonitoredLpRows();
   if (!rows || rows.length === 0) {
@@ -1544,6 +1858,7 @@ async function monitorLPs(options = {}) {
     byChain.get(chainId).push(r);
   }
 
+  const steerCache = new Map();
   try {
     for (const [chainId, chainRows] of byChain.entries()) {
       let provider = null;
@@ -1571,43 +1886,45 @@ async function monitorLPs(options = {}) {
           continue;
         }
 
-        if (!rpcLockPath) {
+        if (!rpcLockPath && !snapshotLockBusy) {
           rpcLockPath = await acquireSnapshotLock({ waitMs: 10_000 });
           if (!rpcLockPath) {
-            const freshSnap = getLpSnapshot({
-              userId: row.userId,
-              walletId: row.walletId,
-              contractId: row.contractId,
-              tokenId: row.tokenId,
-            });
-            if (isSnapshotFresh(freshSnap?.snapshotAt)) {
-              snapshotCount += 1;
-              try {
-                await describeLpFromSnapshot(row, freshSnap, { verbose });
-              } catch (err) {
-                logger.error(
-                  `  [ERROR] Failed snapshot LP tokenId=${row.tokenId} on ${chainId}:`,
-                  err?.message || err
-                );
-              }
-              continue;
-            }
-            logger.warn(
-              `[LP] Snapshot stale and refresh lock busy; using stale snapshot for token=${row.tokenId}`
-            );
-            if (freshSnap) {
-              snapshotCount += 1;
-              try {
-                await describeLpFromSnapshot(row, freshSnap, { verbose });
-              } catch (err) {
-                logger.error(
-                  `  [ERROR] Failed snapshot LP tokenId=${row.tokenId} on ${chainId}:`,
-                  err?.message || err
-                );
-              }
+            snapshotLockBusy = true;
+            logger.warn("[LP] Snapshot refresh lock busy this cycle; using stale snapshots.");
+          }
+        }
+
+        if (!rpcLockPath) {
+          const freshSnap = getLpSnapshot({
+            userId: row.userId,
+            walletId: row.walletId,
+            contractId: row.contractId,
+            tokenId: row.tokenId,
+          });
+          if (isSnapshotFresh(freshSnap?.snapshotAt)) {
+            snapshotCount += 1;
+            try {
+              await describeLpFromSnapshot(row, freshSnap, { verbose });
+            } catch (err) {
+              logger.error(
+                `  [ERROR] Failed snapshot LP tokenId=${row.tokenId} on ${chainId}:`,
+                err?.message || err
+              );
             }
             continue;
           }
+          if (freshSnap) {
+            snapshotCount += 1;
+            try {
+              await describeLpFromSnapshot(row, freshSnap, { verbose });
+            } catch (err) {
+              logger.error(
+                `  [ERROR] Failed snapshot LP tokenId=${row.tokenId} on ${chainId}:`,
+                err?.message || err
+              );
+            }
+          }
+          continue;
         }
 
         rpcCount += 1;
@@ -1621,9 +1938,20 @@ async function monitorLPs(options = {}) {
         }
 
         try {
-          await describeLpPosition(provider, chainId, row.protocol || "UNKNOWN_PROTOCOL", row, {
-            verbose,
-          });
+          if (row.contractKind === "LP_ALM") {
+            const summary = await summarizeSteerAlmPosition(
+              provider,
+              chainId,
+              row.protocol || "UNKNOWN_PROTOCOL",
+              row,
+              { cache: steerCache }
+            );
+            await describeLpFromSnapshot(row, { ...summary, snapshotAt: new Date().toISOString() }, { verbose });
+          } else {
+            await describeLpPosition(provider, chainId, row.protocol || "UNKNOWN_PROTOCOL", row, {
+              verbose,
+            });
+          }
         } catch (err) {
           logger.error(
             `  [ERROR] Failed to describe LP tokenId=${row.tokenId} on ${chainId}:`,

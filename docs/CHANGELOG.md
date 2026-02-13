@@ -13,6 +13,19 @@ All notable, user-facing changes are documented here.
 - LP monitoring/command debug output was cleaned up (less noisy logs, no behavior change).
 - LP contract config cleanup: removed legacy `csvFile` entries from `data/lp_contracts.json`.
 
+## [2026-02-13]
+
+### Added
+- Automatic SparkDEX Steer ALM v4 vault discovery on FLR via `VaultCreated` (registry-driven), with DB cursor tracking for incremental catch-up scans.
+- New ALM config source: `data/alm_contracts.json` (periphery + discovery sources), used as the single source of truth for ALM settings.
+
+### Changed
+- LP monitoring/commands now support mixed LP sources:
+  - `LP_NFT` (existing NFT positions)
+  - `LP_ALM` (vault-share positions)
+- ALM snapshot rendering is share/value focused (no range/tier alert semantics), and ALM alerts are disabled.
+- Daily heartbeat now shows separate headline counts for regular LPs and ALMs.
+
 ## [2026-01-29]
 
 ### Changed

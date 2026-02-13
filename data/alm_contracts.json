@@ -1,0 +1,18 @@
+{
+  "chains": {
+    "FLR": {
+      "periphery": "0x7Daa68204232a78dBF1Dd853a4018330EE934A39",
+      "discoveries": [
+        {
+          "key": "sparkdex_steer_alm_v4",
+          "protocol": "SPARKDEX_STEER_ALM_V4",
+          "kind": "LP_ALM",
+          "registry": "0x64F9A121Ccbb8956249Ed52C4f63d0f759da53Ce",
+          "start_block": 54900000,
+          "beacon_name": "MultiPositionSparkIntegral",
+          "contract_key_prefix": "sparkdex_steer_alm_v4_"
+        }
+      ]
+    }
+  }
+}

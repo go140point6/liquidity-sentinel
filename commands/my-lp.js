@@ -48,6 +48,12 @@ function fmtNum(n) {
   return fmtSig.format(n);
 }
 
+function fmtSigned(n) {
+  const out = fmtNum(n);
+  if (out == null) return null;
+  return n > 0 ? `+${out}` : out;
+}
+
 function fmtUsd(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return null;
   if (n === 0) return "$0";
@@ -137,7 +143,10 @@ module.exports = {
 
       const priceCache = loadPriceCache(db);
 
-      displaySummaries.sort((a, b) => {
+      const regularSummaries = displaySummaries.filter((s) => s.positionModel !== "ALM");
+      const almSummaries = displaySummaries.filter((s) => s.positionModel === "ALM");
+
+      regularSummaries.sort((a, b) => {
         const rangeOrder = { OUT_OF_RANGE: 0, UNKNOWN: 1, IN_RANGE: 2 };
         const tierOrder = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, UNKNOWN: 4 };
 
@@ -151,10 +160,15 @@ module.exports = {
 
         return (a.protocol || "").localeCompare(b.protocol || "");
       });
+      almSummaries.sort((a, b) => {
+        const pa = (a.protocol || "").localeCompare(b.protocol || "");
+        if (pa !== 0) return pa;
+        return (a.pairLabel || "").localeCompare(b.pairLabel || "");
+      });
 
       const descLines = [
         "Current status of your monitored LP positions.",
-        "_Range status is based on the current pool tick vs your position bounds._",
+        "_Regular LP positions use range/tier metrics. ALM positions use share/value metrics._",
         "_Amounts are estimated from liquidity + pool price; fees are current uncollected amounts when available._",
       ];
 
@@ -184,7 +198,7 @@ module.exports = {
         UNKNOWN: "⬜",
       };
 
-      const fields = displaySummaries.map((s) => {
+      const buildRegularField = (s) => {
         const tokenLabel = shortenTroveId(s.tokenId);
         const tokenLink = formatLpPositionLink(s.protocol, s.tokenId, tokenLabel);
         const header = `${s.protocol || "UNKNOWN_PROTOCOL"} (${s.chainId || "?"})`;
@@ -279,7 +293,81 @@ module.exports = {
         if (value.length > 1024) value = value.slice(0, 1020) + "…";
 
         return { name: header, value };
-      });
+      };
+
+      const buildAlmField = (s) => {
+        const tokenLabel = shortenTroveId(s.tokenId);
+        const tokenLink = formatLpPositionLink(s.protocol, s.tokenId, tokenLabel);
+        const header = `${s.protocol || "UNKNOWN_PROTOCOL"} (${s.chainId || "?"})`;
+        const valueLines = [];
+
+        const sym0 = s.token0Symbol || s.token0 || "?";
+        const sym1 = s.token1Symbol || s.token1 || "?";
+        const baseSym = normalizeSymbol(s.priceBaseSymbol || sym0);
+        const quoteSym = normalizeSymbol(s.priceQuoteSymbol || sym1);
+        const priceMap = priceCache.get(String(s.chainId || "").toUpperCase());
+        let priceBase = Number(priceMap?.get(baseSym));
+        let priceQuote = Number(priceMap?.get(quoteSym));
+        if (!Number.isFinite(priceBase) && isStableUsd(s.chainId, baseSym)) priceBase = 1;
+        if (!Number.isFinite(priceQuote) && isStableUsd(s.chainId, quoteSym)) priceQuote = 1;
+
+        if (s.pairLabel) valueLines.push(`Pair: **${s.pairLabel}**`);
+        else valueLines.push(`Pair: **${sym0} - ${sym1}**`);
+        valueLines.push(`Vault: ${tokenLink}`);
+        if (s.owner) {
+          const walletText = formatAddressLink(s.chainId, s.owner) || `**${shortenAddress(s.owner)}**`;
+          valueLines.push(`Wallet: ${walletText}`);
+        }
+
+        const sharePct = Number.isFinite(s.almSharePct)
+          ? Number(s.almSharePct)
+          : computePoolSharePct(s.liquidity, s.poolLiquidity);
+        if (Number.isFinite(sharePct)) {
+          valueLines.push(`Your share: **${sharePct.toFixed(2)}%**`);
+        }
+
+        const a0 = fmtNum(s.amount0);
+        const a1 = fmtNum(s.amount1);
+        const usd0 =
+          Number.isFinite(s.amount0) && Number.isFinite(priceBase)
+            ? fmtUsd(s.amount0 * priceBase)
+            : null;
+        const usd1 =
+          Number.isFinite(s.amount1) && Number.isFinite(priceQuote)
+            ? fmtUsd(s.amount1 * priceQuote)
+            : null;
+        if (a0 != null || a1 != null) {
+          const p = [];
+          if (a0 != null) p.push(`**${a0} ${sym0}**${usd0 ? ` (${usd0})` : ""}`);
+          if (a1 != null) p.push(`**${a1} ${sym1}**${usd1 ? ` (${usd1})` : ""}`);
+          valueLines.push(`Your vault share value: ${p.join(" + ")}`);
+        }
+
+        const vt0 = fmtNum(s.vaultTotalAmount0);
+        const vt1 = fmtNum(s.vaultTotalAmount1);
+        if (vt0 != null || vt1 != null) {
+          const p = [];
+          if (vt0 != null) p.push(`**${vt0} ${sym0}**`);
+          if (vt1 != null) p.push(`**${vt1} ${sym1}**`);
+          valueLines.push(`Vault total: ${p.join(" + ")}`);
+        }
+
+        let value = valueLines.join("\n");
+        if (value.length > 1024) value = value.slice(0, 1020) + "…";
+        return { name: header, value };
+      };
+
+      const regularFields = regularSummaries.map(buildRegularField);
+      const almFields = almSummaries.map(buildAlmField);
+      const fields = [];
+      fields.push(...regularFields);
+      if (regularFields.length && almFields.length) {
+        fields.push({
+          name: "ALM Positions",
+          value: "_Managed vault positions shown with share and value metrics._",
+        });
+      }
+      fields.push(...almFields);
 
       const MAX_EMBED_CHARS = 4800;
       const descText = descLines.join("\n");

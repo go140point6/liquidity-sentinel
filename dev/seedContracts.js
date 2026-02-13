@@ -1,7 +1,6 @@
 // dev/seedContracts.js
 const fs = require("fs");
 const path = require("path");
-const Database = require("better-sqlite3");
 const { ethers } = require("ethers");
 
 // Always load .env from project root
@@ -9,6 +8,8 @@ require("dotenv").config({
   path: path.join(__dirname, "..", ".env"),
   quiet: true,
 });
+
+const { getDb } = require("../db");
 
 function requireEnv(name) {
   const v = process.env[name];
@@ -76,7 +77,7 @@ function collectContractsFromLpConfig(lpCfg) {
     for (const c of contracts) {
       out.push({
         chain_id: chainId,
-        kind: "LP_NFT",
+        kind: (c.kind || "LP_NFT").toUpperCase(),
         contract_key: c.key,
         protocol: c.protocol,
         address: c.contract, // lp JSON uses "contract"
@@ -88,10 +89,8 @@ function collectContractsFromLpConfig(lpCfg) {
 }
 
 function seed() {
-  const db = new Database(DB_PATH);
+  const db = getDb();
   try {
-    db.pragma("foreign_keys = ON");
-    db.pragma("busy_timeout = 5000");
 
     const insert = db.prepare(`
       INSERT INTO contracts (
@@ -125,6 +124,9 @@ function seed() {
 
     const rows = rowsRaw.map((r) => {
       const { address_lower, address_eip55 } = normalizeAddress(r.address);
+      if (!["LP_NFT", "LP_ALM", "LOAN_NFT"].includes(r.kind)) {
+        throw new Error(`Unsupported contract kind: ${r.kind} (key=${r.contract_key})`);
+      }
 
       const default_start_block = normalizeStartBlock(r.default_start_block, {
         fallback: 0,
@@ -184,7 +186,7 @@ function seed() {
       );
     }
   } finally {
-    db.close();
+    // DB lifecycle is managed by db/index singleton handlers.
   }
 }
 
