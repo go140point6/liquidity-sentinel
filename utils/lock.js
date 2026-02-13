@@ -25,6 +25,30 @@ function ensureDir() {
   }
 }
 
+function parseLockPid(lockPath) {
+  try {
+    const raw = fs.readFileSync(lockPath, "utf8");
+    const data = JSON.parse(raw);
+    const pid = Number(data?.pid);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // ESRCH => no such process (dead)
+    // EPERM => process exists but no permission (alive)
+    if (err?.code === "EPERM") return true;
+    return false;
+  }
+}
+
 /**
  * Attempt to acquire a filesystem lock.
  *
@@ -46,18 +70,28 @@ function acquireLock(name) {
   try {
     const stat = fs.statSync(lockPath);
     const age = now - stat.mtimeMs;
+    const pid = parseLockPid(lockPath);
+    const pidAlive = pid ? isPidAlive(pid) : null;
 
-    if (age < STALE_MS) {
+    // If the owner PID is gone, clear immediately (no need to wait STALE_MS).
+    if (pid && !pidAlive) {
+      try {
+        fs.unlinkSync(lockPath);
+        logger?.warn(`[LOCK] Removed dead-PID lock: ${lockPath} (pid ${pid})`);
+      } catch {
+        return null;
+      }
+    } else if (age < STALE_MS) {
       // Active lock
       return null;
-    }
-
-    // Stale lock — attempt cleanup
-    try {
-      fs.unlinkSync(lockPath);
-      logger?.warn(`[LOCK] Removed stale lock: ${lockPath}`);
-    } catch {
-      return null;
+    } else {
+      // Stale lock by age — attempt cleanup
+      try {
+        fs.unlinkSync(lockPath);
+        logger?.warn(`[LOCK] Removed stale lock: ${lockPath}`);
+      } catch {
+        return null;
+      }
     }
   } catch (err) {
     if (err.code !== "ENOENT") {

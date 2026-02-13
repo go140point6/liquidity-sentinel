@@ -995,6 +995,7 @@ async function monitorLoans() {
   let globalIrMap = null;
   let cdpState = null;
   let rpcLockPath = null;
+  let snapshotLockBusy = false;
   const providers = {};
   const getP = (chainId) => (providers[chainId] ||= getProviderForChain(chainId, CHAINS_CONFIG));
 
@@ -1034,43 +1035,45 @@ async function monitorLoans() {
           continue;
         }
 
-        if (!rpcLockPath) {
+        if (!rpcLockPath && !snapshotLockBusy) {
           rpcLockPath = await acquireSnapshotLock({ waitMs: 10_000 });
           if (!rpcLockPath) {
-            const freshSnap = getDebtAheadSnapshot({
-              userId: row.userId,
-              walletId: row.walletId,
-              contractId: row.contractId,
-              troveId: row.troveId,
-            });
-            if (isSnapshotFresh(freshSnap?.snapshotAt)) {
-              logger.debug(
-                `[loanMonitor] trove=${row.troveId} ${row.protocol || "UNKNOWN_PROTOCOL"} ` +
-                  `${row.chainId || chainId} using refreshed snapshot`
-              );
-              try {
-                await describeLoanFromSnapshot(row, freshSnap, { cdpState });
-              } catch (err) {
-                logger.error(
-                  `[loanMonitor] Failed snapshot troveId=${row.troveId} chain=${chainId} protocol=${row.protocol}: ${err?.message || err}`
-                );
-              }
-              continue;
-            }
-            logger.warn(
-              `[loanMonitor] Snapshot stale and refresh lock busy; using stale snapshot for trove=${row.troveId}`
+            snapshotLockBusy = true;
+            logger.warn("[loanMonitor] Snapshot refresh lock busy this cycle; using stale snapshots.");
+          }
+        }
+
+        if (!rpcLockPath) {
+          const freshSnap = getDebtAheadSnapshot({
+            userId: row.userId,
+            walletId: row.walletId,
+            contractId: row.contractId,
+            troveId: row.troveId,
+          });
+          if (isSnapshotFresh(freshSnap?.snapshotAt)) {
+            logger.debug(
+              `[loanMonitor] trove=${row.troveId} ${row.protocol || "UNKNOWN_PROTOCOL"} ` +
+                `${row.chainId || chainId} using refreshed snapshot`
             );
-            if (freshSnap) {
-              try {
-                await describeLoanFromSnapshot(row, freshSnap, { cdpState });
-              } catch (err) {
-                logger.error(
-                  `[loanMonitor] Failed snapshot troveId=${row.troveId} chain=${chainId} protocol=${row.protocol}: ${err?.message || err}`
-                );
-              }
+            try {
+              await describeLoanFromSnapshot(row, freshSnap, { cdpState });
+            } catch (err) {
+              logger.error(
+                `[loanMonitor] Failed snapshot troveId=${row.troveId} chain=${chainId} protocol=${row.protocol}: ${err?.message || err}`
+              );
             }
             continue;
           }
+          if (freshSnap) {
+            try {
+              await describeLoanFromSnapshot(row, freshSnap, { cdpState });
+            } catch (err) {
+              logger.error(
+                `[loanMonitor] Failed snapshot troveId=${row.troveId} chain=${chainId} protocol=${row.protocol}: ${err?.message || err}`
+              );
+            }
+          }
+          continue;
         }
 
         logger.debug(

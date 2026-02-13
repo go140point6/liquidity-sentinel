@@ -16,12 +16,14 @@ const logger = baseLogger.forEnv("SCAN_DEBUG"); // required in .env (fail-fast)
 const { acquireLock, releaseLock } = require("../utils/lock");
 const { refreshLoanSnapshots } = require("../monitoring/loanMonitor");
 const { refreshLpSnapshots } = require("../monitoring/lpMonitor");
+const { getAlmDiscoveriesForChain } = require("../utils/almConfig");
 const { buildSymbolsFromLpSnapshots, refreshPriceCache } = require("../utils/priceCache");
 const { initSchema } = require("../db");
 const troveNftAbi = require("../abi/troveNFT.json");
 const troveManagerAbi = require("../abi/troveManager.json");
 const sortedTrovesAbi = require("../abi/sortedTroves.json");
 const activePoolAbi = require("../abi/activePool.json");
+const steerVaultRegistryAbi = require("../abi/steerVaultRegistry.json");
 
 // =========================================================
 // ENV VALIDATION (FAIL FAST)
@@ -313,7 +315,7 @@ function selectContracts(db, { chainId, kind, limit }) {
     FROM contracts
     WHERE is_enabled = 1
       ${chainId ? "AND chain_id = ?" : ""}
-      ${kind ? "AND kind = ?" : ""}
+      ${kind ? "AND kind = ?" : "AND kind IN ('LP_NFT','LOAN_NFT')"}
     ORDER BY chain_id, kind, contract_key
     LIMIT ?
   `;
@@ -342,6 +344,219 @@ function updateCursor(db, contractId, lastBlock) {
     SET last_scanned_block = ?, last_scanned_at = datetime('now')
     WHERE contract_id = ?
   `).run(lastBlock, contractId);
+}
+
+function getGlobalParam(db, chainId, paramKey) {
+  const row = db
+    .prepare(
+      `
+      SELECT value_text
+      FROM global_params
+      WHERE chain_id = ? AND param_key = ?
+    `
+    )
+    .get(chainId, paramKey);
+  return row?.value_text ?? null;
+}
+
+function upsertGlobalParam(db, chainId, paramKey, valueText, source = "scanLoanLpPositions") {
+  db.prepare(
+    `
+    INSERT INTO global_params (chain_id, param_key, value_text, source, fetched_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(chain_id, param_key) DO UPDATE SET
+      value_text = excluded.value_text,
+      source = excluded.source,
+      fetched_at = excluded.fetched_at
+  `
+  ).run(chainId, paramKey, String(valueText), source);
+}
+
+function getContractByAddressLower(db, chainId, addressLower) {
+  return db
+    .prepare(
+      `
+      SELECT id, contract_key, protocol, kind, is_enabled
+      FROM contracts
+      WHERE chain_id = ? AND address_lower = ?
+      LIMIT 1
+    `
+    )
+    .get(chainId, addressLower);
+}
+
+function buildUniqueSteerContractKey(db, tokenId, addressLower, keyPrefix) {
+  let key = `${keyPrefix}${tokenId}`;
+  let suffix = 0;
+  while (true) {
+    const exists = db
+      .prepare(`SELECT 1 FROM contracts WHERE contract_key = ? LIMIT 1`)
+      .get(key);
+    if (!exists) return key;
+    suffix += 1;
+    key = `${keyPrefix}${tokenId}_${addressLower.slice(2, 8)}_${suffix}`;
+  }
+}
+
+function upsertDiscoveredSteerVaultContract(db, { chainId, protocol, kind, keyPrefix, vaultAddress, tokenId, blockNumber }) {
+  const addr = ethers.getAddress(vaultAddress);
+  const lower = addr.toLowerCase();
+  const existing = getContractByAddressLower(db, chainId, lower);
+
+  if (existing) {
+    db.prepare(
+      `
+      UPDATE contracts
+      SET is_enabled = 1
+      WHERE id = ?
+    `
+    ).run(existing.id);
+    ensureCursor(db, existing.id, Math.max(0, Number(blockNumber) || 0));
+    return { created: false, contractId: existing.id, contractKey: existing.contract_key, address: addr };
+  }
+
+  const contractKey = buildUniqueSteerContractKey(db, tokenId, lower, keyPrefix);
+  const startBlock = Math.max(0, Number(blockNumber) || 0);
+  const res = db
+    .prepare(
+      `
+      INSERT INTO contracts (
+        chain_id, kind, contract_key, protocol,
+        address_lower, address_eip55,
+        default_start_block, is_enabled
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+    `
+    )
+    .run(chainId, kind, contractKey, protocol, lower, addr, startBlock);
+
+  const contractId = Number(res.lastInsertRowid);
+  ensureCursor(db, contractId, startBlock);
+  return { created: true, contractId, contractKey, address: addr };
+}
+
+async function discoverAlmVaultsForSource(db, provider, src) {
+  const chainId = src.chainId;
+  const registry = ethers.getAddress(src.registry);
+  const contract = new ethers.Contract(registry, steerVaultRegistryAbi, provider);
+  const topic = contract.interface.getEvent("VaultCreated").topicHash;
+  const cursorKey = `alm_discovery_cursor_${src.key}`;
+
+  const latestBlock = await provider.getBlockNumber();
+  const cursorRaw = getGlobalParam(db, chainId, cursorKey);
+  const cursor = Number(cursorRaw);
+  const lastScanned = Number.isInteger(cursor) && cursor >= 0 ? cursor : 0;
+  const startBlock = Number.isInteger(cursor) && cursor > 0
+    ? Math.max(src.startBlock, cursor + 1)
+    : src.startBlock;
+
+  if (startBlock > latestBlock) {
+    log(`\n=== ${chainId} ${src.kind} ${src.key} ===`);
+    log(`  start_block=${startBlock} last_scanned=${lastScanned}`);
+    log(`  latestBlock=${latestBlock}`);
+    log("  ⏭️ nothing to scan");
+    log("");
+    return { scannedBlocks: 0, events: 0, created: 0, touched: 0, lastBlock: latestBlock };
+  }
+
+  const maxBlocks = scanBlocksForChain(chainId);
+  const pauseMs = pauseMsForChain(chainId);
+  const totalWindows = Math.ceil((latestBlock - startBlock + 1) / (maxBlocks + 1));
+  let scannedBlocks = 0;
+  let events = 0;
+  let created = 0;
+  let touched = 0;
+  let lastGoodBlock = startBlock - 1;
+  let windowIndex = 0;
+
+  log(`\n=== ${chainId} ${src.kind} ${src.key} ===`);
+  log(`  start_block=${startBlock} last_scanned=${lastScanned}`);
+  log(`  latestBlock=${latestBlock}`);
+  vlog(
+    `  windows=${totalWindows} window_size=${maxBlocks} pause=${pauseMs}ms registry=${registry}`
+  );
+
+  for (let b = startBlock; b <= latestBlock; b += maxBlocks + 1) {
+    const toBlock = Math.min(b + maxBlocks, latestBlock);
+    windowIndex += 1;
+    scannedBlocks += toBlock - b + 1;
+    vlog(`      [${windowIndex}/${totalWindows}] blocks ${b} → ${toBlock}`);
+
+    const res = await getLogsWithRetry(provider, {
+      address: registry,
+      fromBlock: b,
+      toBlock,
+      topics: [topic],
+    });
+    if (!res.ok) {
+      logger.warn(
+        `[scanLoanLpPositions] ALM discovery window failed permanently ${b}-${toBlock}: ${res.error?.message || res.error}`
+      );
+      break;
+    }
+    vlog(`        logs=${res.logs.length}`);
+
+    for (const lg of res.logs) {
+      let parsed;
+      try {
+        parsed = contract.interface.parseLog({
+          topics: lg.topics,
+          data: lg.data,
+        });
+      } catch {
+        continue;
+      }
+      const beaconName = String(parsed?.args?.beaconName || "");
+      if (beaconName !== src.beaconName) continue;
+
+      const vault = parsed.args.vault;
+      const tokenId = parsed.args.tokenId.toString();
+      events += 1;
+      const up = upsertDiscoveredSteerVaultContract(db, {
+        chainId,
+        protocol: src.protocol,
+        kind: src.kind,
+        keyPrefix: src.contractKeyPrefix,
+        vaultAddress: vault,
+        tokenId,
+        blockNumber: lg.blockNumber,
+      });
+      touched += 1;
+      if (up.created) {
+        created += 1;
+        log(
+          `  + discovered ${up.contractKey} ${up.address} tokenId=${tokenId} block=${lg.blockNumber}`
+        );
+      }
+    }
+
+    lastGoodBlock = toBlock;
+    if (pauseMs > 0) {
+      vlog(`        pause ${pauseMs}ms`);
+      await sleep(pauseMs);
+    }
+  }
+
+  if (lastGoodBlock >= startBlock) {
+    upsertGlobalParam(db, chainId, cursorKey, String(lastGoodBlock), "alm-discovery");
+    log(`  ✅ advanced cursor to ${lastGoodBlock} (scanned ${scannedBlocks} blocks)`);
+  } else {
+    log("  ⏭️ cursor NOT advanced");
+  }
+  vlog(`  discovered events=${events} created=${created} touched=${touched}`);
+  log("");
+  return { scannedBlocks, events, created, touched, lastBlock: lastGoodBlock };
+}
+
+async function discoverAlmVaults(db, providerByChain, chainFilter = null) {
+  const chainIds = chainFilter ? [chainFilter] : ["FLR", "XDC"];
+  for (const chainId of chainIds) {
+    const sources = getAlmDiscoveriesForChain(chainId);
+    if (!sources.length) continue;
+    const provider = providerByChain[chainId] || (providerByChain[chainId] = await initProvider(chainId));
+    for (const src of sources) {
+      await discoverAlmVaultsForSource(db, provider, src);
+    }
+  }
 }
 
 // =========================================================
@@ -937,8 +1152,12 @@ async function main() {
   db.pragma("busy_timeout = 5000");
 
   try {
+    const chainFilter = chain ? chain.toUpperCase() : null;
+    const discoveryProviders = {};
+    await discoverAlmVaults(db, discoveryProviders, chainFilter);
+
     const contracts = selectContracts(db, {
-      chainId: chain ? chain.toUpperCase() : null,
+      chainId: chainFilter,
       kind: kind ? kind.toUpperCase() : null,
       limit: limit ?? 200,
     });

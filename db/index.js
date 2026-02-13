@@ -30,7 +30,7 @@ function initSchema(db) {
   CREATE TABLE IF NOT EXISTS contracts (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     chain_id        TEXT NOT NULL,
-    kind            TEXT NOT NULL CHECK (kind IN ('LP_NFT', 'LOAN_NFT')),
+    kind            TEXT NOT NULL CHECK (kind IN ('LP_NFT', 'LP_ALM', 'LOAN_NFT')),
     contract_key    TEXT NOT NULL UNIQUE,
     protocol        TEXT NOT NULL,
     address_lower   TEXT NOT NULL,
@@ -360,6 +360,64 @@ function initSchema(db) {
     INSERT OR IGNORE INTO chains (id, name) VALUES
       ('FLR', 'Flare'),
       ('XDC', 'XDC Network');
+  `);
+
+  const contractsSqlRow = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'contracts'`)
+    .get();
+  const contractsSql = String(contractsSqlRow?.sql || "").toUpperCase();
+  const supportsLpAlm = contractsSql.includes("LP_ALM");
+  if (!supportsLpAlm) {
+    const fkWasOn = Number(db.pragma("foreign_keys", { simple: true })) === 1;
+    if (fkWasOn) db.pragma("foreign_keys = OFF");
+    try {
+      db.exec(`
+        CREATE TABLE contracts__new (
+          id              INTEGER PRIMARY KEY AUTOINCREMENT,
+          chain_id        TEXT NOT NULL,
+          kind            TEXT NOT NULL CHECK (kind IN ('LP_NFT', 'LP_ALM', 'LOAN_NFT')),
+          contract_key    TEXT NOT NULL UNIQUE,
+          protocol        TEXT NOT NULL,
+          address_lower   TEXT NOT NULL,
+          address_eip55   TEXT NOT NULL,
+          default_start_block INTEGER NOT NULL DEFAULT 0 CHECK (default_start_block >= 0),
+          is_enabled      INTEGER NOT NULL DEFAULT 1 CHECK (is_enabled IN (0,1)),
+          created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+          FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE RESTRICT,
+          CHECK (address_lower = lower(address_lower)),
+          CHECK (length(address_lower) = 42 AND substr(address_lower, 1, 2) = '0x'),
+          CHECK (length(address_eip55) = 42 AND substr(address_eip55, 1, 2) = '0x'),
+          UNIQUE (chain_id, address_lower)
+        );
+
+        INSERT INTO contracts__new (
+          id, chain_id, kind, contract_key, protocol, address_lower, address_eip55,
+          default_start_block, is_enabled, created_at, updated_at
+        )
+        SELECT
+          id, chain_id, kind, contract_key, protocol, address_lower, address_eip55,
+          default_start_block, is_enabled, created_at, updated_at
+        FROM contracts;
+
+        DROP TABLE contracts;
+        ALTER TABLE contracts__new RENAME TO contracts;
+      `);
+    } finally {
+      if (fkWasOn) db.pragma("foreign_keys = ON");
+    }
+  }
+
+  // Recreate contracts indexes/trigger in case contracts table was rebuilt above.
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_contracts_chain_kind ON contracts(chain_id, kind);
+    CREATE INDEX IF NOT EXISTS idx_contracts_protocol   ON contracts(protocol);
+    CREATE TRIGGER IF NOT EXISTS trg_contracts_updated_at
+    AFTER UPDATE ON contracts
+    FOR EACH ROW
+    BEGIN
+      UPDATE contracts SET updated_at = datetime('now') WHERE id = OLD.id;
+    END;
   `);
 
   const ensureColumn = (table, column, sqlType) => {

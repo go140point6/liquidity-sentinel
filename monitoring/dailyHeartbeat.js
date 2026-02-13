@@ -267,6 +267,13 @@ function lpPoolKey(s) {
   return `${s.chainId || "?"}|${s.protocol || "UNKNOWN"}|${s.poolAddr || pair}`;
 }
 
+function isAlmPosition(s) {
+  if (!s) return false;
+  if (String(s.positionModel || "").toUpperCase() === "ALM") return true;
+  if (String(s.contractKind || "").toUpperCase() === "LP_ALM") return true;
+  return String(s.protocol || "").toUpperCase().includes("_ALM_");
+}
+
 function formatLpField(s, priceCache) {
   const tokenId = s.tokenId ?? s.positionId ?? "?";
   const tokenLink = formatLpPositionLink(s.protocol, tokenId, shortenTroveId(tokenId));
@@ -368,6 +375,79 @@ function formatLpField(s, priceCache) {
   return { name: title, value: parts.join("\n") };
 }
 
+function formatAlmLpField(s, priceCache) {
+  const tokenId = s.tokenId ?? s.positionId ?? "?";
+  const tokenLink = formatLpPositionLink(s.protocol, tokenId, shortenTroveId(tokenId));
+  const pair =
+    s.pairLabel ||
+    `${s.token0Symbol || s.token0 || "?"}-${s.token1Symbol || s.token1 || "?"}`;
+  const title = `${s.protocol || "UNKNOWN"} ${pair} (${s.chainId || "?"})`;
+  const parts = [];
+  parts.push(`Vault: ${tokenLink}`);
+  if (s.owner) {
+    const walletText = formatAddressLink(s.chainId, s.owner) || shortenAddress(s.owner);
+    parts.push(`Wallet: ${walletText}`);
+  }
+
+  const chainId = String(s.chainId || "").toUpperCase();
+  const priceMap = priceCache?.get(chainId);
+  const baseSym = normalizeSymbol(s.priceBaseSymbol || s.token0Symbol || s.token0);
+  const quoteSym = normalizeSymbol(s.priceQuoteSymbol || s.token1Symbol || s.token1);
+  let priceBase = Number(priceMap?.get(baseSym));
+  let priceQuote = Number(priceMap?.get(quoteSym));
+  const price = Number(s.currentPrice);
+
+  if (!Number.isFinite(priceBase) && isStableUsd(chainId, baseSym)) priceBase = 1;
+  if (!Number.isFinite(priceQuote) && isStableUsd(chainId, quoteSym)) priceQuote = 1;
+  if (!Number.isFinite(priceBase) && Number.isFinite(priceQuote) && Number.isFinite(price) && price > 0) {
+    priceBase = priceQuote * price;
+  } else if (
+    !Number.isFinite(priceQuote) &&
+    Number.isFinite(priceBase) &&
+    Number.isFinite(price) &&
+    price > 0
+  ) {
+    priceQuote = priceBase / price;
+  }
+
+  const sharePct = Number.isFinite(s.almSharePct)
+    ? Number(s.almSharePct)
+    : computePoolSharePct(s.liquidity, s.poolLiquidity);
+  if (Number.isFinite(sharePct)) {
+    parts.push(`Your share: **${sharePct.toFixed(2)}%**`);
+  }
+
+  const sym0 = s.token0Symbol || "token0";
+  const sym1 = s.token1Symbol || "token1";
+  if (
+    typeof s.amount0 === "number" &&
+    Number.isFinite(s.amount0) &&
+    typeof s.amount1 === "number" &&
+    Number.isFinite(s.amount1)
+  ) {
+    const usd0 = Number.isFinite(priceBase) ? fmtUsd(s.amount0 * priceBase) : null;
+    const usd1 = Number.isFinite(priceQuote) ? fmtUsd(s.amount1 * priceQuote) : null;
+    parts.push(
+      `Your vault share value: ${formatTokenAmount(s.amount0)} ${sym0}${usd0 ? ` (${usd0})` : ""}, ` +
+        `${formatTokenAmount(s.amount1)} ${sym1}${usd1 ? ` (${usd1})` : ""}`
+    );
+  }
+
+  if (
+    typeof s.vaultTotalAmount0 === "number" &&
+    Number.isFinite(s.vaultTotalAmount0) &&
+    typeof s.vaultTotalAmount1 === "number" &&
+    Number.isFinite(s.vaultTotalAmount1)
+  ) {
+    parts.push(
+      `Vault total: ${formatTokenAmount(s.vaultTotalAmount0)} ${sym0}, ` +
+        `${formatTokenAmount(s.vaultTotalAmount1)} ${sym1}`
+    );
+  }
+
+  return { name: title, value: parts.join("\n") };
+}
+
 function worstLoanTier(loans) {
   const order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"];
   let worst = "UNKNOWN";
@@ -420,8 +500,11 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
     const status = String(s.status || s.rangeStatus || "").toUpperCase();
     return status !== "INACTIVE";
   });
+  const activeRegularLpSummaries = activeLpSummaries.filter((s) => !isAlmPosition(s));
+  const activeAlmLpSummaries = activeLpSummaries.filter((s) => isAlmPosition(s));
   const loanCount = activeLoanSummaries.length;
-  const lpCount = activeLpSummaries.length;
+  const lpCount = activeRegularLpSummaries.length;
+  const almCount = activeAlmLpSummaries.length;
 
   const snapshotTimes = []
     .concat(activeLoanSummaries)
@@ -433,7 +516,7 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
     ? formatSnapshotLine(new Date(latestSnapshot * 1000).toISOString())
     : null;
 
-  const headerLines = [`Loans: **${loanCount}** | LPs: **${lpCount}**`];
+  const headerLines = [`Loans: **${loanCount}** | LPs: **${lpCount}** | ALMs: **${almCount}**`];
   if (snapshotLine) headerLines.push("", snapshotLine);
 
   const header = new EmbedBuilder()
@@ -486,7 +569,7 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
   }
 
   const order = { OUT_OF_RANGE: 0, UNKNOWN: 1, IN_RANGE: 2 };
-  const lpFields = activeLpSummaries
+  const regularLpFields = activeRegularLpSummaries
     .slice()
     .sort((a, b) => {
       const ra = order[a.rangeStatus] ?? 99;
@@ -495,6 +578,14 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
       return (a.protocol || "").localeCompare(b.protocol || "");
     })
     .map((s) => formatLpField(s, priceCache));
+  const almLpFields = activeAlmLpSummaries
+    .slice()
+    .sort((a, b) => {
+      const pa = (a.protocol || "").localeCompare(b.protocol || "");
+      if (pa !== 0) return pa;
+      return (a.pairLabel || "").localeCompare(b.pairLabel || "");
+    })
+    .map((s) => formatAlmLpField(s, priceCache));
 
   const poolShareTotals = new Map();
   const poolMeta = new Map();
@@ -538,7 +629,7 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
     });
   }
 
-  if (!lpFields.length) {
+  if (!regularLpFields.length) {
     embeds.push(
       new EmbedBuilder()
         .setTitle("LP Positions")
@@ -548,10 +639,10 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
   } else {
     const baseSize = "LP Positions".length + 200;
     const MAX_EMBED_CHARS = 5200;
-    const chunks = chunkFieldsBySize(lpFields, baseSize, MAX_EMBED_CHARS);
+    const chunks = chunkFieldsBySize(regularLpFields, baseSize, MAX_EMBED_CHARS);
     chunks.forEach((fields, idx) => {
       const fieldIds = new Set(fields.map((f) => f.name));
-      const chunkLps = activeLpSummaries.filter((s) => {
+      const chunkLps = activeRegularLpSummaries.filter((s) => {
         const tokenId = s.tokenId ?? s.positionId ?? "?";
         const pair =
           s.pairLabel ||
@@ -565,6 +656,22 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
         .setTitle(idx === 0 ? "LP Positions" : "LP Positions (cont.)")
         .setColor("DarkBlue")
         .addFields(fields);
+      embeds.push(e);
+    });
+  }
+
+  if (almLpFields.length) {
+    const baseSize = "ALM LP Positions".length + 200;
+    const MAX_EMBED_CHARS = 5200;
+    const chunks = chunkFieldsBySize(almLpFields, baseSize, MAX_EMBED_CHARS);
+    chunks.forEach((fields, idx) => {
+      const e = new EmbedBuilder()
+        .setTitle(idx === 0 ? "ALM LP Positions" : "ALM LP Positions (cont.)")
+        .setColor("DarkBlue")
+        .addFields(fields);
+      if (idx === 0) {
+        e.setDescription("_Managed vault positions shown with share and value metrics._");
+      }
       embeds.push(e);
     });
   }

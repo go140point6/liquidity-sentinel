@@ -44,7 +44,7 @@ CREATE TABLE contracts (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
 
   chain_id        TEXT NOT NULL,
-  kind            TEXT NOT NULL CHECK (kind IN ('LP_NFT', 'LOAN_NFT')),
+  kind            TEXT NOT NULL CHECK (kind IN ('LP_NFT', 'LP_ALM', 'LOAN_NFT')),
 
   contract_key    TEXT NOT NULL UNIQUE,   -- stable key for code: 'enosys_lp', etc.
   protocol        TEXT NOT NULL,          -- display label: 'ENOSYS', etc.
