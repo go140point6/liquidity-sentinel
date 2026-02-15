@@ -166,6 +166,23 @@ module.exports = {
         const baseSym = normalizeSymbol(obj.priceBaseSymbol || obj.token0Symbol);
         const quoteSym = normalizeSymbol(obj.priceQuoteSymbol || obj.token1Symbol);
         const price = Number(obj.currentPrice);
+        const amount0 = Number(obj.amount0);
+        const amount1 = Number(obj.amount1);
+
+        if (!Number.isFinite(amount0) || !Number.isFinite(amount1)) {
+          const reasons = [];
+          if (!Number.isFinite(amount0)) reasons.push("invalid amount0");
+          if (!Number.isFinite(amount1)) reasons.push("invalid amount1");
+          unpricedDetails.push({
+            chainId,
+            protocol: obj.protocol,
+            tokenId: obj.tokenId,
+            baseSym,
+            quoteSym,
+            reasons: reasons.join(", "),
+          });
+          continue;
+        }
 
         let priceBase = Number(priceMap?.get(baseSym));
         let priceQuote = Number(priceMap?.get(quoteSym));
@@ -185,10 +202,26 @@ module.exports = {
           priceQuote = priceBase / price;
         }
 
-        if (!Number.isFinite(priceBase) || !Number.isFinite(priceQuote)) {
+        // ALM snapshots may omit currentPrice; infer token prices from position token ratio when possible.
+        // ratio = quote per base (token1 / token0)
+        const ratio = amount0 > 0 ? amount1 / amount0 : NaN;
+        if (!Number.isFinite(priceBase) && Number.isFinite(priceQuote) && Number.isFinite(ratio) && ratio > 0) {
+          priceBase = priceQuote * ratio;
+        } else if (
+          !Number.isFinite(priceQuote) &&
+          Number.isFinite(priceBase) &&
+          Number.isFinite(ratio) &&
+          ratio > 0
+        ) {
+          priceQuote = priceBase / ratio;
+        }
+
+        const needsBasePrice = amount0 !== 0;
+        const needsQuotePrice = amount1 !== 0;
+        if ((needsBasePrice && !Number.isFinite(priceBase)) || (needsQuotePrice && !Number.isFinite(priceQuote))) {
           const reasons = [];
-          if (!Number.isFinite(priceBase)) reasons.push("missing price base");
-          if (!Number.isFinite(priceQuote)) reasons.push("missing price quote");
+          if (needsBasePrice && !Number.isFinite(priceBase)) reasons.push("missing price base");
+          if (needsQuotePrice && !Number.isFinite(priceQuote)) reasons.push("missing price quote");
           unpricedDetails.push({
             chainId,
             protocol: obj.protocol,
@@ -200,24 +233,9 @@ module.exports = {
           continue;
         }
 
-        const amount0 = Number(obj.amount0);
-        const amount1 = Number(obj.amount1);
-        if (!Number.isFinite(amount0) || !Number.isFinite(amount1)) {
-          const reasons = [];
-          if (!Number.isFinite(amount0)) reasons.push("invalid amount0");
-          if (!Number.isFinite(amount1)) reasons.push("invalid amount1");
-          unpricedDetails.push({
-            chainId,
-            protocol: obj.protocol,
-            tokenId: obj.tokenId,
-            baseSym,
-            quoteSym,
-            reasons: reasons.join(", "),
-          });
-          continue;
-        }
-
-        const tvl = amount0 * priceBase + amount1 * priceQuote;
+        const safePriceBase = Number.isFinite(priceBase) ? priceBase : 0;
+        const safePriceQuote = Number.isFinite(priceQuote) ? priceQuote : 0;
+        const tvl = amount0 * safePriceBase + amount1 * safePriceQuote;
         totalLpTvl += tvl;
         pricedLpCount += 1;
 
@@ -227,8 +245,8 @@ module.exports = {
           tokenId: obj.tokenId,
           amount0,
           amount1,
-          priceBase,
-          priceQuote,
+          priceBase: safePriceBase,
+          priceQuote: safePriceQuote,
           baseSym,
           quoteSym,
           tvl,
