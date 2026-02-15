@@ -126,6 +126,10 @@ module.exports = {
 
       const activeLoanCount = loanSnaps.length;
       const activeLpCount = lpSnaps.length;
+      const activeAlmCount = lpSnaps.filter(
+        (r) => String(r.data?.positionModel || "").toUpperCase() === "ALM"
+      ).length;
+      const activeRegularLpCount = Math.max(0, activeLpCount - activeAlmCount);
       const totalUsers = userIds.size;
 
       let flareOnly = 0;
@@ -153,6 +157,7 @@ module.exports = {
       let totalLpTvl = 0;
       let pricedLpCount = 0;
       const pricedDetails = [];
+      const unpricedDetails = [];
       for (const r of lpSnaps) {
         const obj = r.data || {};
         const chainId = String(obj.chainId || "").toUpperCase();
@@ -180,11 +185,37 @@ module.exports = {
           priceQuote = priceBase / price;
         }
 
-        if (!Number.isFinite(priceBase) || !Number.isFinite(priceQuote)) continue;
+        if (!Number.isFinite(priceBase) || !Number.isFinite(priceQuote)) {
+          const reasons = [];
+          if (!Number.isFinite(priceBase)) reasons.push("missing price base");
+          if (!Number.isFinite(priceQuote)) reasons.push("missing price quote");
+          unpricedDetails.push({
+            chainId,
+            protocol: obj.protocol,
+            tokenId: obj.tokenId,
+            baseSym,
+            quoteSym,
+            reasons: reasons.join(", "),
+          });
+          continue;
+        }
 
         const amount0 = Number(obj.amount0);
         const amount1 = Number(obj.amount1);
-        if (!Number.isFinite(amount0) || !Number.isFinite(amount1)) continue;
+        if (!Number.isFinite(amount0) || !Number.isFinite(amount1)) {
+          const reasons = [];
+          if (!Number.isFinite(amount0)) reasons.push("invalid amount0");
+          if (!Number.isFinite(amount1)) reasons.push("invalid amount1");
+          unpricedDetails.push({
+            chainId,
+            protocol: obj.protocol,
+            tokenId: obj.tokenId,
+            baseSym,
+            quoteSym,
+            reasons: reasons.join(", "),
+          });
+          continue;
+        }
 
         const tvl = amount0 * priceBase + amount1 * priceQuote;
         totalLpTvl += tvl;
@@ -219,6 +250,24 @@ module.exports = {
           );
         }
       }
+      if (unpricedDetails.length) {
+        const reasonCounts = new Map();
+        for (const p of unpricedDetails) {
+          reasonCounts.set(p.reasons, (reasonCounts.get(p.reasons) || 0) + 1);
+        }
+        const reasonSummary = Array.from(reasonCounts.entries())
+          .sort((a, b) => b[1] - a[1])
+          .map(([k, v]) => `${k}: ${v}`)
+          .join(" | ");
+        logger.debug(`[stats] LP TVL unpriced summary: total=${unpricedDetails.length} ${reasonSummary}`);
+
+        for (const p of unpricedDetails.slice(0, 50)) {
+          logger.debug(
+            `[stats] LP TVL unpriced ${p.chainId} ${p.protocol} token=${p.tokenId} ` +
+              `${p.baseSym || "?"}/${p.quoteSym || "?"} reason=${p.reasons}`
+          );
+        }
+      }
 
       const firelightSubs = db.prepare("SELECT COUNT(1) AS cnt FROM firelight_subscriptions").get()?.cnt || 0;
 
@@ -248,8 +297,8 @@ module.exports = {
           { name: "Wallets tracking", value: fmt0.format(walletIds.size), inline: true },
           { name: "\u200b", value: "\u200b", inline: true },
           { name: "Active loans", value: fmt0.format(activeLoanCount), inline: true },
-          { name: "Active LPs", value: fmt0.format(activeLpCount), inline: true },
-          { name: "\u200b", value: "\u200b", inline: true },
+          { name: "Active LPs", value: fmt0.format(activeRegularLpCount), inline: true },
+          { name: "Active ALMs", value: fmt0.format(activeAlmCount), inline: true },
           {
             name: "Flare users only",
             value: `${fmt0.format(flareOnly)} (${fmt0.format(flarePct)}%)`,
@@ -266,9 +315,9 @@ module.exports = {
             inline: true,
           },
           { name: "Total loan debt (USD)", value: `$${fmt2.format(totalLoanDebt)}`, inline: true },
-          { name: "Total LP TVL (USD)", value: `$${fmt2.format(totalLpTvl)}`, inline: true },
+          { name: "Total LP+ALM TVL (USD)*", value: `$${fmt2.format(totalLpTvl)}`, inline: true },
           {
-            name: "TVL coverage",
+            name: "Total TVL coverage (USD)*",
             value:
               lpCoveragePct == null
                 ? "n/a"
@@ -278,8 +327,12 @@ module.exports = {
             inline: true,
           },
           { name: "Firelight subscribers", value: fmt0.format(firelightSubs), inline: true },
-          { name: "\u200b", value: "\u200b", inline: true },
-          { name: "\u200b", value: "\u200b", inline: true }
+          {
+            name: "* TVL notes",
+            value:
+              "LP+ALM TVL uses only active positions with available USD pricing. Coverage shows how much of active LP+ALM set is priceable.",
+            inline: false,
+          }
         );
       embed.setTimestamp(new Date());
 

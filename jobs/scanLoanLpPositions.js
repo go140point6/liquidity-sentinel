@@ -1135,6 +1135,10 @@ async function scanContract(db, provider, c) {
 // MAIN
 // =========================================================
 async function main() {
+  const runLabel = "scanLoanLpPositions";
+  const t0 = Date.now();
+  logger.info(`▶️  ${runLabel} start`);
+
   const args = process.argv.slice(2);
   const chain = args.find((a) => a.startsWith("--chain="))?.split("=")[1];
   const kind = args.find((a) => a.startsWith("--kind="))?.split("=")[1];
@@ -1152,92 +1156,97 @@ async function main() {
   db.pragma("busy_timeout = 5000");
 
   try {
-    const chainFilter = chain ? chain.toUpperCase() : null;
-    const discoveryProviders = {};
-    await discoverAlmVaults(db, discoveryProviders, chainFilter);
-
-    const contracts = selectContracts(db, {
-      chainId: chainFilter,
-      kind: kind ? kind.toUpperCase() : null,
-      limit: limit ?? 200,
-    });
-
-    if (!contracts.length) {
-      log("[scanLoanLpPositions] no contracts found");
-      return;
-    }
-
-    const providers = {};
-    for (const c of contracts) {
-      if (!providers[c.chain_id]) {
-        providers[c.chain_id] = await initProvider(c.chain_id);
-      }
-      await scanContract(db, providers[c.chain_id], c);
-    }
-
-    log("\n[scanLoanLpPositions] DONE");
-    log("[scanLoanLpPositions] Refreshing cached snapshots...");
-    await refreshLoanSnapshots();
-
-    let lpAgeMin = Infinity;
-    const lpAgeRow = db
-      .prepare(`SELECT MAX(snapshot_at) AS snapshot_at FROM lp_position_snapshots`)
-      .get();
-    if (lpAgeRow?.snapshot_at) {
-      lpAgeMin = minutesSince(lpAgeRow.snapshot_at);
-    }
-    const hasPendingLpSnapshot = db.prepare(`
-      SELECT 1
-      FROM nft_tokens t
-      JOIN contracts c ON c.id = t.contract_id
-      JOIN user_wallets w ON t.owner_lower = w.address_lower AND w.chain_id = c.chain_id
-      LEFT JOIN position_ignores pi
-        ON pi.user_id        = w.user_id
-       AND pi.position_kind  = 'LP'
-       AND pi.wallet_id      = w.id
-       AND pi.contract_id    = t.contract_id
-       AND (pi.token_id IS NULL OR pi.token_id = t.token_id)
-      WHERE c.kind = 'LP_NFT'
-        AND t.is_burned = 0
-        AND w.is_enabled = 1
-        AND c.is_enabled = 1
-        AND pi.id IS NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM lp_position_snapshots s
-          WHERE s.contract_id = t.contract_id
-            AND s.token_id = t.token_id
-            AND s.wallet_id = w.id
-        )
-      LIMIT 1
-    `).get();
-
-    if (!hasPendingLpSnapshot && Number.isFinite(lpAgeMin) && lpAgeMin < LP_SNAPSHOT_MINUTES) {
-      logger.debug(
-        `[scanLoanLpPositions] LP snapshot refresh skipped: last snapshot ${lpAgeMin.toFixed(
-          1
-        )}m ago`
-      );
-    } else {
-      if (hasPendingLpSnapshot) {
-        logger.debug(
-          "[scanLoanLpPositions] LP snapshot refresh forced: new tracked LP(s) pending snapshot"
-        );
-      }
-      await refreshLpSnapshots();
-    }
-
     try {
-      const symbolsByChain = buildSymbolsFromLpSnapshots(db);
-      await refreshPriceCache(db, symbolsByChain);
-    } catch (err) {
-      logger.warn(`[scanLoanLpPositions] price cache refresh failed: ${err.message || err}`);
-    }
+      const chainFilter = chain ? chain.toUpperCase() : null;
+      const discoveryProviders = {};
+      await discoverAlmVaults(db, discoveryProviders, chainFilter);
 
-    log("[scanLoanLpPositions] Refreshing redemption-rate snapshots...");
-    await refreshRedemptionRateSnapshots(db, providers);
-    log("[scanLoanLpPositions] Snapshot refresh complete.");
+      const contracts = selectContracts(db, {
+        chainId: chainFilter,
+        kind: kind ? kind.toUpperCase() : null,
+        limit: limit ?? 200,
+      });
+
+      if (!contracts.length) {
+        log("[scanLoanLpPositions] no contracts found");
+        return;
+      }
+
+      const providers = {};
+      for (const c of contracts) {
+        if (!providers[c.chain_id]) {
+          providers[c.chain_id] = await initProvider(c.chain_id);
+        }
+        await scanContract(db, providers[c.chain_id], c);
+      }
+
+      log("\n[scanLoanLpPositions] DONE");
+      log("[scanLoanLpPositions] Refreshing cached snapshots...");
+      await refreshLoanSnapshots();
+
+      let lpAgeMin = Infinity;
+      const lpAgeRow = db
+        .prepare(`SELECT MAX(snapshot_at) AS snapshot_at FROM lp_position_snapshots`)
+        .get();
+      if (lpAgeRow?.snapshot_at) {
+        lpAgeMin = minutesSince(lpAgeRow.snapshot_at);
+      }
+      const hasPendingLpSnapshot = db.prepare(`
+        SELECT 1
+        FROM nft_tokens t
+        JOIN contracts c ON c.id = t.contract_id
+        JOIN user_wallets w ON t.owner_lower = w.address_lower AND w.chain_id = c.chain_id
+        LEFT JOIN position_ignores pi
+          ON pi.user_id        = w.user_id
+         AND pi.position_kind  = 'LP'
+         AND pi.wallet_id      = w.id
+         AND pi.contract_id    = t.contract_id
+         AND (pi.token_id IS NULL OR pi.token_id = t.token_id)
+        WHERE c.kind = 'LP_NFT'
+          AND t.is_burned = 0
+          AND w.is_enabled = 1
+          AND c.is_enabled = 1
+          AND pi.id IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM lp_position_snapshots s
+            WHERE s.contract_id = t.contract_id
+              AND s.token_id = t.token_id
+              AND s.wallet_id = w.id
+          )
+        LIMIT 1
+      `).get();
+
+      if (!hasPendingLpSnapshot && Number.isFinite(lpAgeMin) && lpAgeMin < LP_SNAPSHOT_MINUTES) {
+        logger.debug(
+          `[scanLoanLpPositions] LP snapshot refresh skipped: last snapshot ${lpAgeMin.toFixed(
+            1
+          )}m ago`
+        );
+      } else {
+        if (hasPendingLpSnapshot) {
+          logger.debug(
+            "[scanLoanLpPositions] LP snapshot refresh forced: new tracked LP(s) pending snapshot"
+          );
+        }
+        await refreshLpSnapshots();
+      }
+
+      try {
+        const symbolsByChain = buildSymbolsFromLpSnapshots(db);
+        await refreshPriceCache(db, symbolsByChain);
+      } catch (err) {
+        logger.warn(`[scanLoanLpPositions] price cache refresh failed: ${err.message || err}`);
+      }
+
+      log("[scanLoanLpPositions] Refreshing redemption-rate snapshots...");
+      await refreshRedemptionRateSnapshots(db, providers);
+      log("[scanLoanLpPositions] Snapshot refresh complete.");
+    } finally {
+      db.close();
+    }
   } finally {
-    db.close();
+    const elapsed = Date.now() - t0;
+    logger.info(`⏹️  ${runLabel} end (elapsed ${elapsed} ms)`);
   }
 }
 
