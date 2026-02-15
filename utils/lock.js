@@ -114,7 +114,7 @@ function acquireLock(name) {
       { flag: "wx" }
     );
 
-    logger?.debug(`[LOCK] Acquired lock: ${lockPath}`);
+    logger?.info(`[LOCK] Acquired lock: ${lockPath}`);
     return lockPath;
   } catch {
     return null;
@@ -132,7 +132,7 @@ function releaseLock(lockPath) {
   try {
     fs.unlinkSync(lockPath);
     const logger = getLogger();
-    logger?.debug(`[LOCK] Released lock: ${lockPath}`);
+    logger?.info(`[LOCK] Released lock: ${lockPath}`);
   } catch {
     // best-effort
   }
