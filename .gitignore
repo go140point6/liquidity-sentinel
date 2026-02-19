@@ -134,3 +134,4 @@ data/*.sqlite*
 data/archive
 ecosystem.config.js
 locks/
+data/metrics/

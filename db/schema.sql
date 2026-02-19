@@ -14,6 +14,12 @@ DROP TABLE IF EXISTS global_params;
 DROP TABLE IF EXISTS loan_token_meta;
 DROP TABLE IF EXISTS lp_token_meta;
 
+DROP TABLE IF EXISTS chain_events;
+DROP TABLE IF EXISTS backfill_windows;
+DROP TABLE IF EXISTS backfill_jobs;
+DROP TABLE IF EXISTS index_cursors;
+DROP TABLE IF EXISTS index_streams;
+
 DROP TABLE IF EXISTS nft_tokens;
 DROP TABLE IF EXISTS nft_transfers;
 DROP TABLE IF EXISTS contract_scan_cursors;
@@ -236,6 +242,98 @@ CREATE TABLE price_cache (
 
   PRIMARY KEY (chain_id, symbol)
 );
+
+-- =========================================================
+-- INDEX STREAMS / CURSORS / BACKFILL
+-- =========================================================
+CREATE TABLE index_streams (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  chain_id      TEXT NOT NULL,
+  contract_id   INTEGER NOT NULL,
+  stream_key    TEXT NOT NULL UNIQUE,
+  event_name    TEXT NOT NULL,
+  topic0        TEXT NOT NULL,
+  start_block   INTEGER NOT NULL DEFAULT 0 CHECK (start_block >= 0),
+  is_enabled    INTEGER NOT NULL DEFAULT 1 CHECK (is_enabled IN (0,1)),
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE CASCADE,
+  FOREIGN KEY (contract_id) REFERENCES contracts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE index_cursors (
+  stream_id              INTEGER PRIMARY KEY,
+  last_scanned_block     INTEGER NOT NULL DEFAULT 0 CHECK (last_scanned_block >= 0),
+  last_scanned_log_index INTEGER,
+  last_scanned_tx_hash   TEXT,
+  last_scanned_at        TEXT,
+  updated_at             TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (stream_id) REFERENCES index_streams(id) ON DELETE CASCADE
+);
+
+CREATE TABLE backfill_jobs (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  stream_id    INTEGER NOT NULL,
+  mode         TEXT NOT NULL CHECK (mode IN ('BACKFILL','TAIL')),
+  from_block   INTEGER NOT NULL CHECK (from_block >= 0),
+  to_block     INTEGER CHECK (to_block IS NULL OR to_block >= from_block),
+  status       TEXT NOT NULL CHECK (status IN ('PENDING','RUNNING','DONE','FAILED','PAUSED')),
+  started_at   TEXT,
+  finished_at  TEXT,
+  error_text   TEXT,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (stream_id) REFERENCES index_streams(id) ON DELETE CASCADE
+);
+
+CREATE TABLE backfill_windows (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id      INTEGER NOT NULL,
+  from_block  INTEGER NOT NULL CHECK (from_block >= 0),
+  to_block    INTEGER NOT NULL CHECK (to_block >= from_block),
+  attempt_no  INTEGER NOT NULL CHECK (attempt_no > 0),
+  logs_found  INTEGER NOT NULL DEFAULT 0 CHECK (logs_found >= 0),
+  status      TEXT NOT NULL CHECK (status IN ('OK','FAILED','SKIPPED')),
+  error_text  TEXT,
+  elapsed_ms  INTEGER,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (job_id) REFERENCES backfill_jobs(id) ON DELETE CASCADE,
+  UNIQUE (job_id, from_block, to_block, attempt_no)
+);
+
+CREATE INDEX idx_index_streams_chain_enabled ON index_streams(chain_id, is_enabled);
+CREATE INDEX idx_index_streams_contract_event ON index_streams(contract_id, event_name);
+CREATE INDEX idx_backfill_jobs_stream_status ON backfill_jobs(stream_id, status, mode);
+CREATE INDEX idx_backfill_windows_job_block ON backfill_windows(job_id, from_block, to_block);
+
+-- =========================================================
+-- CANONICAL RAW CHAIN EVENTS
+-- =========================================================
+CREATE TABLE chain_events (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  chain_id      TEXT NOT NULL,
+  contract_id   INTEGER NOT NULL,
+  stream_id     INTEGER NOT NULL,
+  block_number  INTEGER NOT NULL CHECK (block_number >= 0),
+  block_hash    TEXT,
+  tx_hash       TEXT NOT NULL,
+  tx_index      INTEGER,
+  log_index     INTEGER NOT NULL CHECK (log_index >= 0),
+  topic0        TEXT NOT NULL,
+  topics_json   TEXT NOT NULL,
+  data_hex      TEXT NOT NULL,
+  event_name    TEXT,
+  decoded_json  TEXT,
+  removed       INTEGER NOT NULL DEFAULT 0 CHECK (removed IN (0,1)),
+  ingested_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE CASCADE,
+  FOREIGN KEY (contract_id) REFERENCES contracts(id) ON DELETE CASCADE,
+  FOREIGN KEY (stream_id) REFERENCES index_streams(id) ON DELETE CASCADE,
+  UNIQUE (chain_id, tx_hash, log_index)
+);
+
+CREATE INDEX idx_chain_events_stream_block ON chain_events(stream_id, block_number, log_index);
+CREATE INDEX idx_chain_events_contract_block ON chain_events(contract_id, block_number, log_index);
+CREATE INDEX idx_chain_events_chain_block ON chain_events(chain_id, block_number, log_index);
 
 -- =========================================================
 -- USERS
@@ -501,4 +599,18 @@ AFTER UPDATE ON alert_state
 FOR EACH ROW
 BEGIN
   UPDATE alert_state SET updated_at = datetime('now') WHERE id = OLD.id;
+END;
+
+CREATE TRIGGER trg_index_streams_updated_at
+AFTER UPDATE ON index_streams
+FOR EACH ROW
+BEGIN
+  UPDATE index_streams SET updated_at = datetime('now') WHERE id = OLD.id;
+END;
+
+CREATE TRIGGER trg_index_cursors_updated_at
+AFTER UPDATE ON index_cursors
+FOR EACH ROW
+BEGIN
+  UPDATE index_cursors SET updated_at = datetime('now') WHERE stream_id = OLD.stream_id;
 END;

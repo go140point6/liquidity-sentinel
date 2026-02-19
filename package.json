@@ -4,7 +4,19 @@
   "description": "Bot template using discordjs v14",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "scan:legacy": "node jobs/scanLoanLpPositions.js",
+    "index:backfill": "node jobs/indexBackfill.js",
+    "index:tail": "node jobs/indexTail.js",
+    "index:derive-nft": "node jobs/deriveNftStateFromEvents.js",
+    "index:cycle": "node jobs/indexPipelineCycle.js",
+    "index:integrity": "node jobs/indexDailyIntegrity.js",
+    "index:validate:continuity": "node dev/validateCursorContinuity.js",
+    "index:validate:dupes": "node dev/validateEventDuplicates.js",
+    "index:validate:boundaries": "node dev/validateBackfillBoundaries.js",
+    "index:coverage": "node dev/coverageSummary.js",
+    "index:shadow:nft": "node dev/shadowDiffNftState.js",
+    "index:shadow:cursors": "node dev/shadowDiffCursors.js"
   },
   "repository": {
     "type": "git",

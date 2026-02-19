@@ -61,6 +61,7 @@ const REDEMP_SNAPSHOT_DEBT_GATE_ENABLED = Number(
   requireEnv("REDEMP_SNAPSHOT_DEBT_GATE_ENABLED")
 );
 const LP_SNAPSHOT_MINUTES = Number(requireEnv("LP_SNAPSHOT_MINUTES"));
+const INDEXER_SKIP_DIRECT_SCAN = Number(requireEnv("INDEXER_SKIP_DIRECT_SCAN"));
 
 function requirePositiveInt(name, n) {
   if (!Number.isInteger(n) || n <= 0) {
@@ -95,6 +96,7 @@ requireFiniteNumber("REDEMP_SNAPSHOT_MIN_DEBT_DELTA_PCT", REDEMP_SNAPSHOT_MIN_DE
 requireNonNegativeInt("REDEMP_SNAPSHOT_REQUIRE_LOANS", REDEMP_SNAPSHOT_REQUIRE_LOANS);
 requireNonNegativeInt("REDEMP_SNAPSHOT_DEBT_GATE_ENABLED", REDEMP_SNAPSHOT_DEBT_GATE_ENABLED);
 requireNonNegativeInt("LP_SNAPSHOT_MINUTES", LP_SNAPSHOT_MINUTES);
+requireNonNegativeInt("INDEXER_SKIP_DIRECT_SCAN", INDEXER_SKIP_DIRECT_SCAN);
 
 if (![0, 1].includes(REDEMP_SNAPSHOT_REQUIRE_LOANS)) {
   logger.error("[scanLoanLpPositions] REDEMP_SNAPSHOT_REQUIRE_LOANS must be 0 or 1");
@@ -106,6 +108,10 @@ if (![0, 1].includes(REDEMP_SNAPSHOT_DEBT_GATE_ENABLED)) {
 }
 if (REDEMP_SNAPSHOT_MIN_DEBT_DELTA_PCT < 0) {
   logger.error("[scanLoanLpPositions] REDEMP_SNAPSHOT_MIN_DEBT_DELTA_PCT must be >= 0");
+  process.exit(1);
+}
+if (![0, 1].includes(INDEXER_SKIP_DIRECT_SCAN)) {
+  logger.error("[scanLoanLpPositions] INDEXER_SKIP_DIRECT_SCAN must be 0 or 1");
   process.exit(1);
 }
 
@@ -1173,11 +1179,15 @@ async function main() {
       }
 
       const providers = {};
-      for (const c of contracts) {
-        if (!providers[c.chain_id]) {
-          providers[c.chain_id] = await initProvider(c.chain_id);
+      if (INDEXER_SKIP_DIRECT_SCAN === 1) {
+        log("[scanLoanLpPositions] direct contract scan skipped (INDEXER_SKIP_DIRECT_SCAN=1)");
+      } else {
+        for (const c of contracts) {
+          if (!providers[c.chain_id]) {
+            providers[c.chain_id] = await initProvider(c.chain_id);
+          }
+          await scanContract(db, providers[c.chain_id], c);
         }
-        await scanContract(db, providers[c.chain_id], c);
       }
 
       log("\n[scanLoanLpPositions] DONE");
