@@ -164,6 +164,9 @@ module.exports = {
       const { getLoanSummaries, getCdpPrice, classifyCdpRedemptionState } = require("../monitoring/loanMonitor");
 
       const summaries = await getLoanSummaries(userId);
+      logger.info(
+        `[my-loans] discordId=${discordId} userId=${userId} summaries=${summaries.length} dbPath=${process.env.DB_PATH || "(unset)"}`
+      );
       const priceCache = loadPriceCache(db);
 
       if (!summaries.length) {
