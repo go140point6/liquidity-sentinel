@@ -60,7 +60,18 @@ const REDEMP_SNAPSHOT_REQUIRE_LOANS = Number(requireEnv("REDEMP_SNAPSHOT_REQUIRE
 const REDEMP_SNAPSHOT_DEBT_GATE_ENABLED = Number(
   requireEnv("REDEMP_SNAPSHOT_DEBT_GATE_ENABLED")
 );
+const LOAN_SNAPSHOT_MINUTES = Number(requireEnv("LOAN_SNAPSHOT_MINUTES"));
 const LP_SNAPSHOT_MINUTES = Number(requireEnv("LP_SNAPSHOT_MINUTES"));
+const INDEXER_SKIP_DIRECT_SCAN = Number(requireEnv("INDEXER_SKIP_DIRECT_SCAN"));
+const HEAVY_REFRESH_MODE = String(requireEnv("HEAVY_REFRESH_MODE")).toUpperCase();
+const HEAVY_PHASES = ["LOAN", "LP", "REDEMP"];
+const HEAVY_PHASE_CHAIN = "FLR";
+const HEAVY_PHASE_KEY = "SCAN_HEAVY_PHASE";
+const FORCE_REFRESH_KEYS = {
+  LOAN: "SCAN_FORCE_REFRESH_LOAN",
+  LP: "SCAN_FORCE_REFRESH_LP",
+  REDEMP: "SCAN_FORCE_REFRESH_REDEMP",
+};
 
 function requirePositiveInt(name, n) {
   if (!Number.isInteger(n) || n <= 0) {
@@ -94,7 +105,9 @@ requireNonNegativeInt("REDEMP_SNAPSHOT_MINUTES", REDEMP_SNAPSHOT_MINUTES);
 requireFiniteNumber("REDEMP_SNAPSHOT_MIN_DEBT_DELTA_PCT", REDEMP_SNAPSHOT_MIN_DEBT_DELTA_PCT);
 requireNonNegativeInt("REDEMP_SNAPSHOT_REQUIRE_LOANS", REDEMP_SNAPSHOT_REQUIRE_LOANS);
 requireNonNegativeInt("REDEMP_SNAPSHOT_DEBT_GATE_ENABLED", REDEMP_SNAPSHOT_DEBT_GATE_ENABLED);
+requireNonNegativeInt("LOAN_SNAPSHOT_MINUTES", LOAN_SNAPSHOT_MINUTES);
 requireNonNegativeInt("LP_SNAPSHOT_MINUTES", LP_SNAPSHOT_MINUTES);
+requireNonNegativeInt("INDEXER_SKIP_DIRECT_SCAN", INDEXER_SKIP_DIRECT_SCAN);
 
 if (![0, 1].includes(REDEMP_SNAPSHOT_REQUIRE_LOANS)) {
   logger.error("[scanLoanLpPositions] REDEMP_SNAPSHOT_REQUIRE_LOANS must be 0 or 1");
@@ -106,6 +119,14 @@ if (![0, 1].includes(REDEMP_SNAPSHOT_DEBT_GATE_ENABLED)) {
 }
 if (REDEMP_SNAPSHOT_MIN_DEBT_DELTA_PCT < 0) {
   logger.error("[scanLoanLpPositions] REDEMP_SNAPSHOT_MIN_DEBT_DELTA_PCT must be >= 0");
+  process.exit(1);
+}
+if (![0, 1].includes(INDEXER_SKIP_DIRECT_SCAN)) {
+  logger.error("[scanLoanLpPositions] INDEXER_SKIP_DIRECT_SCAN must be 0 or 1");
+  process.exit(1);
+}
+if (!["ALL", "ROUND_ROBIN"].includes(HEAVY_REFRESH_MODE)) {
+  logger.error("[scanLoanLpPositions] HEAVY_REFRESH_MODE must be ALL or ROUND_ROBIN");
   process.exit(1);
 }
 
@@ -752,7 +773,12 @@ function computeBuckets(irDebts, totalDebt) {
   }));
 }
 
-async function refreshRedemptionRateSnapshots(db, providers) {
+async function refreshRedemptionRateSnapshots(
+  db,
+  providers,
+  sharedLoanContractContext = null,
+  { forceRefresh = false } = {}
+) {
   const loanContracts = selectContracts(db, { chainId: null, kind: "LOAN_NFT", limit: 500 });
   if (!loanContracts.length) return;
 
@@ -814,7 +840,7 @@ async function refreshRedemptionRateSnapshots(db, providers) {
     }
     const lastSnapshot = selectLastSnapshot.get(c.contract_id);
     const ageMin = minutesSince(lastSnapshot?.snapshot_at);
-    if (!pendingLoan && Number.isFinite(ageMin) && ageMin < REDEMP_SNAPSHOT_MINUTES) {
+    if (!forceRefresh && !pendingLoan && Number.isFinite(ageMin) && ageMin < REDEMP_SNAPSHOT_MINUTES) {
       logger.debug(
         `[scanLoanLpPositions] redemption-rate skip ${c.protocol}: last snapshot ${ageMin.toFixed(
           1
@@ -825,18 +851,39 @@ async function refreshRedemptionRateSnapshots(db, providers) {
 
     const chainId = c.chain_id;
     const provider = providers[chainId] || (providers[chainId] = await initProvider(chainId));
+    const sharedKey = `${chainId}:${c.contract_id}`;
+    const sharedCtx =
+      sharedLoanContractContext && typeof sharedLoanContractContext.get === "function"
+        ? sharedLoanContractContext.get(sharedKey)
+        : null;
 
     let attempt = 0;
     let lastErr = null;
     const maxAttempts = 3;
+    let troveManagerAddr = sharedCtx?.troveManagerAddr || null;
+    let poolStats = sharedCtx?.poolStats || null;
     while (attempt < maxAttempts) {
       attempt += 1;
       try {
-        const nft = new ethers.Contract(c.address_eip55, troveNftAbi, provider);
-        const troveManagerAddr = await nft.troveManager();
+        if (!troveManagerAddr) {
+          const nft = new ethers.Contract(c.address_eip55, troveNftAbi, provider);
+          troveManagerAddr = await nft.troveManager();
+        }
 
-        const poolStats = await getActivePoolStats(provider, troveManagerAddr);
+        if (!poolStats) {
+          poolStats = await getActivePoolStats(provider, troveManagerAddr);
+        }
         if (!poolStats) break;
+        if (
+          sharedLoanContractContext &&
+          typeof sharedLoanContractContext.set === "function" &&
+          c.contract_id != null
+        ) {
+          sharedLoanContractContext.set(sharedKey, {
+            troveManagerAddr,
+            poolStats,
+          });
+        }
 
         logger.debug(
           `[scanLoanLpPositions] redemption-rate ${c.protocol} totalDebt=${poolStats.totalDebt.toFixed(
@@ -845,6 +892,7 @@ async function refreshRedemptionRateSnapshots(db, providers) {
         );
 
         if (
+          !forceRefresh &&
           REDEMP_SNAPSHOT_DEBT_GATE_ENABLED &&
           !pendingLoan &&
           lastSnapshot?.snapshot_json &&
@@ -924,6 +972,71 @@ async function refreshRedemptionRateSnapshots(db, providers) {
     // small throttle between contracts to avoid bursts
     await sleep(250);
   }
+}
+
+function getRoundRobinHeavyPhase(db) {
+  if (HEAVY_REFRESH_MODE !== "ROUND_ROBIN") return "ALL";
+  try {
+    const row = db
+      .prepare(
+        `
+        SELECT value_text
+        FROM global_params
+        WHERE chain_id = ? AND param_key = ?
+        LIMIT 1
+      `
+      )
+      .get(HEAVY_PHASE_CHAIN, HEAVY_PHASE_KEY);
+    const current = String(row?.value_text || "").toUpperCase();
+    if (HEAVY_PHASES.includes(current)) return current;
+  } catch (_) {}
+  return HEAVY_PHASES[0];
+}
+
+function advanceRoundRobinHeavyPhase(db, currentPhase) {
+  if (HEAVY_REFRESH_MODE !== "ROUND_ROBIN") return;
+  const cur = String(currentPhase || "").toUpperCase();
+  const idx = HEAVY_PHASES.indexOf(cur);
+  const next = HEAVY_PHASES[(idx >= 0 ? idx + 1 : 1) % HEAVY_PHASES.length];
+  upsertGlobalParam(db, HEAVY_PHASE_CHAIN, HEAVY_PHASE_KEY, next, "scan-round-robin");
+}
+
+function getForceRefreshFlags(db) {
+  const rows = db
+    .prepare(
+      `
+      SELECT param_key, value_text
+      FROM global_params
+      WHERE param_key IN (?, ?, ?)
+    `
+    )
+    .all(FORCE_REFRESH_KEYS.LOAN, FORCE_REFRESH_KEYS.LP, FORCE_REFRESH_KEYS.REDEMP);
+
+  const out = { LOAN: false, LP: false, REDEMP: false };
+  for (const r of rows) {
+    const key = String(r?.param_key || "").toUpperCase();
+    const value = String(r?.value_text || "").trim();
+    const enabled = value === "1" || value.toLowerCase() === "true";
+    if (key === FORCE_REFRESH_KEYS.LOAN) out.LOAN = out.LOAN || enabled;
+    if (key === FORCE_REFRESH_KEYS.LP) out.LP = out.LP || enabled;
+    if (key === FORCE_REFRESH_KEYS.REDEMP) out.REDEMP = out.REDEMP || enabled;
+  }
+  return out;
+}
+
+function clearForceRefreshFlag(db, family) {
+  const fam = String(family || "").toUpperCase();
+  const key = FORCE_REFRESH_KEYS[fam];
+  if (!key) return;
+  db.prepare(
+    `
+    UPDATE global_params
+    SET value_text = '0',
+        source = 'scan-force-refresh-clear',
+        fetched_at = datetime('now')
+    WHERE param_key = ?
+  `
+  ).run(key);
 }
 
 // =========================================================
@@ -1173,16 +1286,91 @@ async function main() {
       }
 
       const providers = {};
-      for (const c of contracts) {
-        if (!providers[c.chain_id]) {
-          providers[c.chain_id] = await initProvider(c.chain_id);
+      if (INDEXER_SKIP_DIRECT_SCAN === 1) {
+        log("[scanLoanLpPositions] direct contract scan skipped (INDEXER_SKIP_DIRECT_SCAN=1)");
+      } else {
+        for (const c of contracts) {
+          if (!providers[c.chain_id]) {
+            providers[c.chain_id] = await initProvider(c.chain_id);
+          }
+          await scanContract(db, providers[c.chain_id], c);
         }
-        await scanContract(db, providers[c.chain_id], c);
       }
 
       log("\n[scanLoanLpPositions] DONE");
       log("[scanLoanLpPositions] Refreshing cached snapshots...");
-      await refreshLoanSnapshots();
+      const heavyPhase = getRoundRobinHeavyPhase(db);
+      const forceFlags = getForceRefreshFlags(db);
+      if (HEAVY_REFRESH_MODE === "ROUND_ROBIN") {
+        log(
+          `[scanLoanLpPositions] heavy refresh phase=${heavyPhase} cadence=${HEAVY_PHASES.join("->")}`
+        );
+      }
+      const forceLoan = forceFlags.LOAN;
+      const forceLp = forceFlags.LP;
+      const forceRedemp = forceFlags.REDEMP;
+      if (forceLoan || forceLp || forceRedemp) {
+        logger.info(
+          `[scanLoanLpPositions] force-refresh flags loan=${forceLoan ? 1 : 0} lp=${forceLp ? 1 : 0} redemp=${forceRedemp ? 1 : 0}`
+        );
+      }
+      const runLoan = HEAVY_REFRESH_MODE === "ALL" || heavyPhase === "LOAN" || forceLoan;
+      const runLp = HEAVY_REFRESH_MODE === "ALL" || heavyPhase === "LP" || forceLp;
+      const runRedemp = HEAVY_REFRESH_MODE === "ALL" || heavyPhase === "REDEMP" || forceRedemp;
+
+      let loanRefreshContext = null;
+      let loanAgeMin = Infinity;
+      const loanAgeRow = db
+        .prepare(`SELECT MAX(snapshot_at) AS snapshot_at FROM loan_position_snapshots`)
+        .get();
+      if (loanAgeRow?.snapshot_at) {
+        loanAgeMin = minutesSince(loanAgeRow.snapshot_at);
+      }
+      const hasPendingLoanSnapshot = db.prepare(`
+        SELECT 1
+        FROM nft_tokens t
+        JOIN contracts c ON c.id = t.contract_id
+        JOIN user_wallets w ON t.owner_lower = w.address_lower AND w.chain_id = c.chain_id
+        LEFT JOIN position_ignores pi
+          ON pi.user_id        = w.user_id
+         AND pi.position_kind  = 'LOAN'
+         AND pi.wallet_id      = w.id
+         AND pi.contract_id    = t.contract_id
+         AND (pi.token_id IS NULL OR pi.token_id = t.token_id)
+        WHERE c.kind = 'LOAN_NFT'
+          AND t.is_burned = 0
+          AND w.is_enabled = 1
+          AND c.is_enabled = 1
+          AND pi.id IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM loan_position_snapshots s
+            WHERE s.contract_id = t.contract_id
+              AND s.token_id = t.token_id
+              AND s.wallet_id = w.id
+          )
+        LIMIT 1
+      `).get();
+
+      if (!runLoan) {
+        logger.debug("[scanLoanLpPositions] Loan snapshot refresh skipped by phase scheduler");
+      } else if (!forceLoan && !hasPendingLoanSnapshot && Number.isFinite(loanAgeMin) && loanAgeMin < LOAN_SNAPSHOT_MINUTES) {
+        logger.debug(
+          `[scanLoanLpPositions] Loan snapshot refresh skipped: last snapshot ${loanAgeMin.toFixed(
+            1
+          )}m ago`
+        );
+      } else {
+        if (hasPendingLoanSnapshot) {
+          logger.debug(
+            "[scanLoanLpPositions] Loan snapshot refresh forced: new tracked loan(s) pending snapshot"
+          );
+        }
+        if (forceLoan) {
+          logger.debug("[scanLoanLpPositions] Loan snapshot refresh forced by SCAN_FORCE_REFRESH_LOAN");
+        }
+        loanRefreshContext = await refreshLoanSnapshots();
+        if (forceLoan) clearForceRefreshFlag(db, "LOAN");
+      }
 
       let lpAgeMin = Infinity;
       const lpAgeRow = db
@@ -1216,7 +1404,9 @@ async function main() {
         LIMIT 1
       `).get();
 
-      if (!hasPendingLpSnapshot && Number.isFinite(lpAgeMin) && lpAgeMin < LP_SNAPSHOT_MINUTES) {
+      if (!runLp) {
+        logger.debug("[scanLoanLpPositions] LP snapshot refresh skipped by phase scheduler");
+      } else if (!forceLp && !hasPendingLpSnapshot && Number.isFinite(lpAgeMin) && lpAgeMin < LP_SNAPSHOT_MINUTES) {
         logger.debug(
           `[scanLoanLpPositions] LP snapshot refresh skipped: last snapshot ${lpAgeMin.toFixed(
             1
@@ -1228,18 +1418,37 @@ async function main() {
             "[scanLoanLpPositions] LP snapshot refresh forced: new tracked LP(s) pending snapshot"
           );
         }
+        if (forceLp) {
+          logger.debug("[scanLoanLpPositions] LP snapshot refresh forced by SCAN_FORCE_REFRESH_LP");
+        }
         await refreshLpSnapshots();
+        if (forceLp) clearForceRefreshFlag(db, "LP");
       }
 
-      try {
-        const symbolsByChain = buildSymbolsFromLpSnapshots(db);
-        await refreshPriceCache(db, symbolsByChain);
-      } catch (err) {
-        logger.warn(`[scanLoanLpPositions] price cache refresh failed: ${err.message || err}`);
+      if (runLp) {
+        try {
+          const symbolsByChain = buildSymbolsFromLpSnapshots(db);
+          await refreshPriceCache(db, symbolsByChain);
+        } catch (err) {
+          logger.warn(`[scanLoanLpPositions] price cache refresh failed: ${err.message || err}`);
+        }
+      } else {
+        logger.debug("[scanLoanLpPositions] price cache refresh skipped by phase scheduler");
       }
 
-      log("[scanLoanLpPositions] Refreshing redemption-rate snapshots...");
-      await refreshRedemptionRateSnapshots(db, providers);
+      if (runRedemp) {
+        log("[scanLoanLpPositions] Refreshing redemption-rate snapshots...");
+        await refreshRedemptionRateSnapshots(db, providers, loanRefreshContext, {
+          forceRefresh: forceRedemp,
+        });
+        if (forceRedemp) clearForceRefreshFlag(db, "REDEMP");
+      } else {
+        logger.debug("[scanLoanLpPositions] redemption-rate refresh skipped by phase scheduler");
+      }
+      if (HEAVY_REFRESH_MODE === "ROUND_ROBIN") {
+        advanceRoundRobinHeavyPhase(db, heavyPhase);
+        logger.debug("[scanLoanLpPositions] advanced heavy refresh phase cursor");
+      }
       log("[scanLoanLpPositions] Snapshot refresh complete.");
     } finally {
       db.close();

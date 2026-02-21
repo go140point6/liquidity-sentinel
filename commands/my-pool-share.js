@@ -18,8 +18,8 @@ function requireNumberEnv(name) {
   return n;
 }
 
-const SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SNAPSHOT_STALE_WARN_MIN");
-const SNAPSHOT_STALE_WARN_MS = Math.max(0, Math.floor(SNAPSHOT_STALE_WARN_MIN * 60 * 1000));
+const LP_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LP_SNAPSHOT_STALE_WARN_MIN");
+const LP_SNAPSHOT_STALE_WARN_MS = Math.max(0, Math.floor(LP_SNAPSHOT_STALE_WARN_MIN * 60 * 1000));
 const fmtPct2 = createDecimalFormatter(2, 2);
 
 function computePoolSharePct(liquidityRaw, poolLiquidityRaw) {
@@ -146,7 +146,7 @@ module.exports = {
         })
         .filter((v) => v != null);
       const latest = snapshotTimes.length ? Math.max(...snapshotTimes) : null;
-      const stale = latest != null ? Date.now() - latest * 1000 > SNAPSHOT_STALE_WARN_MS : false;
+      const stale = latest != null ? Date.now() - latest * 1000 > LP_SNAPSHOT_STALE_WARN_MS : false;
       const warn = stale ? " ⚠️ Data may be stale." : "";
       const dataCaptured = latest != null ? `Data captured: <t:${latest}:f>${warn}` : "Data captured: n/a";
 
@@ -174,4 +174,3 @@ module.exports = {
     }
   },
 };
-

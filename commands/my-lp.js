@@ -17,8 +17,8 @@ function requireNumberEnv(name) {
   return n;
 }
 
-const SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SNAPSHOT_STALE_WARN_MIN");
-const SNAPSHOT_STALE_WARN_MS = Math.max(0, Math.floor(SNAPSHOT_STALE_WARN_MIN * 60 * 1000));
+const LP_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LP_SNAPSHOT_STALE_WARN_MIN");
+const LP_SNAPSHOT_STALE_WARN_MS = Math.max(0, Math.floor(LP_SNAPSHOT_STALE_WARN_MIN * 60 * 1000));
 
 function chunk(arr, size) {
   const out = [];
@@ -184,7 +184,7 @@ module.exports = {
       if (snapshotTimes.length) {
         const latest = Math.max(...snapshotTimes);
         const ageMs = Date.now() - latest * 1000;
-        const stale = ageMs > SNAPSHOT_STALE_WARN_MS;
+        const stale = ageMs > LP_SNAPSHOT_STALE_WARN_MS;
         const warn = stale ? " ⚠️ Data may be stale." : "";
         descLines.push("");
         descLines.push(`Data captured: <t:${latest}:f>${warn}`);

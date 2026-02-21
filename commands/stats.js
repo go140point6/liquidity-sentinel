@@ -17,8 +17,12 @@ function requireNumberEnv(name) {
   return n;
 }
 
-const SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SNAPSHOT_STALE_WARN_MIN");
-const SNAPSHOT_STALE_WARN_MS = Math.max(0, Math.floor(SNAPSHOT_STALE_WARN_MIN * 60 * 1000));
+const LOAN_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LOAN_SNAPSHOT_STALE_WARN_MIN");
+const LP_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LP_SNAPSHOT_STALE_WARN_MIN");
+const SNAPSHOT_STALE_WARN_MS = Math.max(
+  0,
+  Math.floor(Math.max(LOAN_SNAPSHOT_STALE_WARN_MIN, LP_SNAPSHOT_STALE_WARN_MIN) * 60 * 1000)
+);
 
 const fmt0 = createDecimalFormatter(0, 0);
 const fmt2 = createDecimalFormatter(0, 2);

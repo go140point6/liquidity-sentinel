@@ -71,7 +71,7 @@ const REDEMP_DEBT_AHEAD_MED_PCT = requireNumberEnv("REDEMP_DEBT_AHEAD_MED_PCT");
 const REDEMP_DEBT_AHEAD_HIGH_PCT = requireNumberEnv("REDEMP_DEBT_AHEAD_HIGH_PCT");
 
 const CDP_REDEMPTION_TRIGGER = requireNumberEnv("CDP_REDEMPTION_TRIGGER");
-const SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SNAPSHOT_STALE_WARN_MIN");
+const LOAN_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LOAN_SNAPSHOT_STALE_WARN_MIN");
 const SNAPSHOT_LOCK_NAME = "snapshot-refresh";
 
 const CDP_PRICE_MODE = requireEnv("CDP_PRICE_MODE").toUpperCase();
@@ -484,7 +484,7 @@ function isSnapshotFresh(snapshotAt) {
   const tsMs = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
   if (!Number.isFinite(tsMs)) return false;
   const ageMin = (Date.now() - tsMs) / 60000;
-  return ageMin < SNAPSHOT_STALE_WARN_MIN;
+  return ageMin < LOAN_SNAPSHOT_STALE_WARN_MIN;
 }
 
 // -----------------------------
@@ -1174,7 +1174,8 @@ async function getLoanSummaries(userId = null) {
 async function refreshLoanSnapshots() {
   const runId = String(Date.now());
   const rows = getMonitoredLoanRows();
-  if (!rows.length) return;
+  const sharedContractContext = new Map();
+  if (!rows.length) return sharedContractContext;
 
   let globalIrMap = null;
   try {
@@ -1213,7 +1214,7 @@ async function refreshLoanSnapshots() {
           }
         }
         const troveManagerAddr = troveManagerByNft.get(nftAddr);
-        if (!troveManagerAddr) return;
+        if (!troveManagerAddr) continue;
 
         if (!poolStatsByContract.has(troveManagerAddr)) {
           try {
@@ -1226,6 +1227,13 @@ async function refreshLoanSnapshots() {
         const stats = poolStatsByContract.get(troveManagerAddr);
         const avgIr = stats?.avgIrPct ?? null;
         const totalDebt = stats?.totalDebt ?? null;
+        if (row.contractId != null) {
+          const key = `${chainId}:${row.contractId}`;
+          sharedContractContext.set(key, {
+            troveManagerAddr,
+            poolStats: stats || null,
+          });
+        }
 
         const debtInfo = await computeDebtInFront(provider, troveManagerAddr, row.troveId);
         const debtAheadPct =
@@ -1286,6 +1294,7 @@ async function refreshLoanSnapshots() {
   }
 
   cleanupLoanSnapshots(runId);
+  return sharedContractContext;
 }
 
 module.exports = {

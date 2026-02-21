@@ -167,7 +167,7 @@ function isSnapshotFresh(snapshotAt) {
   const tsMs = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
   if (!Number.isFinite(tsMs)) return false;
   const ageMin = (Date.now() - tsMs) / 60000;
-  return ageMin < SNAPSHOT_STALE_WARN_MIN;
+  return ageMin < LP_SNAPSHOT_STALE_WARN_MIN;
 }
 
 // -----------------------------
@@ -187,7 +187,7 @@ const LP_EDGE_WARN_FRAC = Number(process.env.LP_EDGE_WARN_FRAC);
 const LP_EDGE_HIGH_FRAC = Number(process.env.LP_EDGE_HIGH_FRAC);
 const LP_OUT_WARN_FRAC = Number(process.env.LP_OUT_WARN_FRAC);
 const LP_OUT_HIGH_FRAC = Number(process.env.LP_OUT_HIGH_FRAC);
-const SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SNAPSHOT_STALE_WARN_MIN");
+const LP_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LP_SNAPSHOT_STALE_WARN_MIN");
 const SNAPSHOT_LOCK_NAME = "snapshot-refresh";
 const ALM_ROLLING_24H_MS = 24 * 60 * 60 * 1000;
 

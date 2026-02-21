@@ -20,6 +20,11 @@ const { formatAddressLink } = require("../../utils/links");
 
 const DEFAULT_HEARTBEAT_TZ = "America/Los_Angeles";
 const EMBED_FIELD_VALUE_MAX = 1024;
+const FORCE_REFRESH_KEYS = [
+  "SCAN_FORCE_REFRESH_LOAN",
+  "SCAN_FORCE_REFRESH_LP",
+  "SCAN_FORCE_REFRESH_REDEMP",
+];
 const TZ_LIST = typeof Intl.supportedValuesOf === "function"
   ? Intl.supportedValuesOf("timeZone")
   : [
@@ -86,6 +91,22 @@ function chunkLinesForEmbed(lines, maxLen = EMBED_FIELD_VALUE_MAX) {
   }
   if (cur) chunks.push(cur);
   return chunks;
+}
+
+function queueScanForceRefresh(db, chainId) {
+  const chain = String(chainId || "").toUpperCase();
+  if (!chain) return;
+  const upsert = db.prepare(`
+    INSERT INTO global_params (chain_id, param_key, value_text, source, fetched_at)
+    VALUES (?, ?, '1', 'my-wallets', datetime('now'))
+    ON CONFLICT(chain_id, param_key) DO UPDATE SET
+      value_text = '1',
+      source = 'my-wallets',
+      fetched_at = datetime('now')
+  `);
+  for (const key of FORCE_REFRESH_KEYS) {
+    upsert.run(chain, key);
+  }
 }
 
 // ===================== UI LOCK START =====================
@@ -581,6 +602,12 @@ async function handleMyWalletsInteraction(interaction) {
 
       try {
         getOrCreateWalletId(db, { userId, chainId, addressInput, label: labelInput });
+        try {
+          queueScanForceRefresh(db, chainId);
+          logger.info(`[my-wallets-ui] queued scan force-refresh flags for chain=${chainId}`);
+        } catch (flagErr) {
+          logger.warn(`[my-wallets-ui] failed to queue scan force-refresh flags: ${flagErr?.message || flagErr}`);
+        }
       } catch (err) {
         await interaction.editReply({ content: `❌ Could not save wallet: ${err.message}` }).catch(() => {});
         return true;
