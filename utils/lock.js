@@ -138,7 +138,59 @@ function releaseLock(lockPath) {
   }
 }
 
+/**
+ * Check whether a named lock is currently active.
+ * Performs the same dead-pid/stale cleanup logic as acquireLock.
+ *
+ * @param {string} name - Logical lock name (file is `${name}.lock`)
+ * @returns {boolean} true if an active lock exists
+ */
+function isLockActive(name) {
+  if (!name || typeof name !== "string") {
+    throw new Error("isLockActive(name) requires a non-empty string name.");
+  }
+
+  ensureDir();
+
+  const lockPath = path.join(LOCK_DIR, `${name}.lock`);
+  const now = Date.now();
+  const logger = getLogger();
+
+  try {
+    const stat = fs.statSync(lockPath);
+    const age = now - stat.mtimeMs;
+    const pid = parseLockPid(lockPath);
+    const pidAlive = pid ? isPidAlive(pid) : null;
+
+    if (pid && !pidAlive) {
+      try {
+        fs.unlinkSync(lockPath);
+        logger?.warn(`[LOCK] Removed dead-PID lock: ${lockPath} (pid ${pid})`);
+      } catch {
+        return true;
+      }
+      return false;
+    }
+
+    if (age >= STALE_MS) {
+      try {
+        fs.unlinkSync(lockPath);
+        logger?.warn(`[LOCK] Removed stale lock: ${lockPath}`);
+      } catch {
+        return true;
+      }
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    if (err?.code === "ENOENT") return false;
+    return true;
+  }
+}
+
 module.exports = {
   acquireLock,
   releaseLock,
+  isLockActive,
 };

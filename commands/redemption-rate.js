@@ -7,11 +7,11 @@ const { shortenAddress } = require("../utils/ethers/shortenAddress");
 const { formatAddressLink, formatLoanTroveLink } = require("../utils/links");
 const logger = require("../utils/logger");
 const { getDebtAheadOffsetPpForProtocol, classifyDebtAheadTier } = require("../monitoring/testOffsets");
-const SNAPSHOT_STALE_WARN_MIN = (() => {
-  const raw = process.env.SNAPSHOT_STALE_WARN_MIN;
+const REDEMP_SNAPSHOT_STALE_WARN_MIN = (() => {
+  const raw = process.env.REDEMP_SNAPSHOT_STALE_WARN_MIN;
   const n = Number(raw);
   if (!Number.isFinite(n)) {
-    throw new Error(`Missing or invalid SNAPSHOT_STALE_WARN_MIN (got "${raw}")`);
+    throw new Error(`Missing or invalid REDEMP_SNAPSHOT_STALE_WARN_MIN (got "${raw}")`);
   }
   return n;
 })();
@@ -38,7 +38,7 @@ function formatSnapshotLine(snapshotAt) {
   const ts = Math.floor(tsMs / 1000);
   const ageMin = (Date.now() - tsMs) / 60000;
   const warn =
-    Number.isFinite(ageMin) && ageMin >= SNAPSHOT_STALE_WARN_MIN
+    Number.isFinite(ageMin) && ageMin >= REDEMP_SNAPSHOT_STALE_WARN_MIN
       ? " ⚠️ Data may be stale."
       : "";
   return `<t:${ts}:f>${warn}`;

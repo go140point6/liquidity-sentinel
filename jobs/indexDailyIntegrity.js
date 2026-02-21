@@ -9,9 +9,12 @@ require("dotenv").config({
 
 const baseLogger = require("../utils/logger");
 const logger = baseLogger.forEnv("SCAN_DEBUG");
-const { acquireLock, releaseLock } = require("../utils/lock");
+const { acquireLock, releaseLock, isLockActive } = require("../utils/lock");
 
 const LOCK_NAME = "index-daily-integrity";
+const PIPELINE_LOCK_NAME = "index-pipeline-cycle";
+const WAIT_POLL_MS = 15000;
+const WAIT_MAX_MS = 15 * 60 * 1000;
 const METRICS_DIR = path.join(__dirname, "..", "data", "metrics");
 const RUNS_JSONL = path.join(METRICS_DIR, "index-integrity-runs.jsonl");
 const LATEST_JSON = path.join(METRICS_DIR, "index-integrity-latest.json");
@@ -24,6 +27,36 @@ function appendRunSummary(summary) {
   ensureMetricsDir();
   fs.appendFileSync(RUNS_JSONL, `${JSON.stringify(summary)}\n`, "utf8");
   fs.writeFileSync(LATEST_JSON, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForPipelineIdle() {
+  const waitStart = Date.now();
+  while (true) {
+    if (!isLockActive(PIPELINE_LOCK_NAME)) {
+      const waited = Date.now() - waitStart;
+      if (waited > 0) {
+        logger.info(`[indexDailyIntegrity] pipeline idle after waiting ${waited}ms`);
+      }
+      return true;
+    }
+
+    const waited = Date.now() - waitStart;
+    if (waited >= WAIT_MAX_MS) {
+      logger.warn(
+        `[indexDailyIntegrity] pipeline lock still active after ${waited}ms; skipping this run`
+      );
+      return false;
+    }
+
+    logger.info(
+      `[indexDailyIntegrity] waiting for pipeline lock (${waited}ms elapsed, poll=${WAIT_POLL_MS}ms)`
+    );
+    await sleep(WAIT_POLL_MS);
+  }
 }
 
 function runNodeScript(scriptRelPath, args = []) {
@@ -89,6 +122,25 @@ async function main() {
   ];
 
   logger.info("[indexDailyIntegrity] start");
+  const pipelineIdle = await waitForPipelineIdle();
+  if (!pipelineIdle) {
+    const endedMs = Date.now();
+    const elapsedMs = endedMs - startedMs;
+    const summary = {
+      started_at: startedAt,
+      ended_at: new Date(endedMs).toISOString(),
+      elapsed_ms: elapsedMs,
+      ok: 1,
+      skipped: 1,
+      skip_reason: "pipeline_lock_timeout",
+      fail_count: 0,
+      step_count: steps.length,
+      steps: [],
+      latest_summary_file: LATEST_JSON,
+    };
+    appendRunSummary(summary);
+    return;
+  }
 
   const stepResults = [];
   let failCount = 0;
@@ -128,6 +180,8 @@ async function main() {
     ended_at: new Date(endedMs).toISOString(),
     elapsed_ms: elapsedMs,
     ok,
+    skipped: 0,
+    skip_reason: null,
     fail_count: failCount,
     step_count: steps.length,
     steps: stepResults,

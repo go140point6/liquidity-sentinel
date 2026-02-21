@@ -9,9 +9,10 @@ require("dotenv").config({
 
 const baseLogger = require("../utils/logger");
 const logger = baseLogger.forEnv("SCAN_DEBUG");
-const { acquireLock, releaseLock } = require("../utils/lock");
+const { acquireLock, releaseLock, isLockActive } = require("../utils/lock");
 
 const LOCK_NAME = "index-pipeline-cycle";
+const INTEGRITY_LOCK_NAME = "index-daily-integrity";
 const METRICS_DIR = path.join(__dirname, "..", "data", "metrics");
 const METRICS_JSONL = path.join(METRICS_DIR, "index-cycle-runs.jsonl");
 const METRICS_SUMMARY = path.join(METRICS_DIR, "index-cycle-summary.json");
@@ -54,6 +55,7 @@ function appendAndSummarizeMetrics(entry) {
     count: elapsed.length,
     ok_count: runs.filter((r) => r.ok === 1).length,
     fail_count: runs.filter((r) => r.ok === 0).length,
+    skipped_count: runs.filter((r) => Number(r?.skipped) === 1).length,
     min_ms: elapsed.length ? elapsed[0] : null,
     p50_ms: percentile(elapsed, 50),
     p95_ms: percentile(elapsed, 95),
@@ -128,6 +130,22 @@ const runStartIso = new Date(runStartMs).toISOString();
 
 async function main() {
   logger.info("[indexPipelineCycle] start");
+  if (isLockActive(INTEGRITY_LOCK_NAME)) {
+    logger.warn("[indexPipelineCycle] integrity run is active, skipping this cycle");
+    const elapsed = Date.now() - runStartMs;
+    const summary = appendAndSummarizeMetrics({
+      started_at: runStartIso,
+      ended_at: new Date().toISOString(),
+      elapsed_ms: elapsed,
+      ok: 1,
+      skipped: 1,
+      skip_reason: "integrity_lock_active",
+    });
+    logger.info(
+      `[indexPipelineCycle] metrics count=${summary.count} skipped=${summary.skipped_count} p50=${summary.p50_ms}ms p95=${summary.p95_ms}ms max=${summary.max_ms}ms file=${METRICS_SUMMARY}`
+    );
+    return;
+  }
 
   // Phase 1: index tail
   logger.info("[indexPipelineCycle] stage 1/5: index tail FLR");
@@ -155,9 +173,10 @@ async function main() {
     ended_at: new Date().toISOString(),
     elapsed_ms: elapsed,
     ok: 1,
+    skipped: 0,
   });
   logger.info(
-    `[indexPipelineCycle] metrics count=${summary.count} p50=${summary.p50_ms}ms p95=${summary.p95_ms}ms max=${summary.max_ms}ms file=${METRICS_SUMMARY}`
+    `[indexPipelineCycle] metrics count=${summary.count} skipped=${summary.skipped_count} p50=${summary.p50_ms}ms p95=${summary.p95_ms}ms max=${summary.max_ms}ms file=${METRICS_SUMMARY}`
   );
 }
 
@@ -171,10 +190,11 @@ main()
         ended_at: new Date(endedAtMs).toISOString(),
         elapsed_ms: elapsed,
         ok: 0,
+        skipped: 0,
         error: String(err?.message || err),
       });
       logger.warn(
-        `[indexPipelineCycle] metrics count=${summary.count} p50=${summary.p50_ms}ms p95=${summary.p95_ms}ms max=${summary.max_ms}ms file=${METRICS_SUMMARY}`
+        `[indexPipelineCycle] metrics count=${summary.count} skipped=${summary.skipped_count} p50=${summary.p50_ms}ms p95=${summary.p95_ms}ms max=${summary.max_ms}ms file=${METRICS_SUMMARY}`
       );
     } catch (_) {}
     logger.error("[indexPipelineCycle] FATAL:", err);

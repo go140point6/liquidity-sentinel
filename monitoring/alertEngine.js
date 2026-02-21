@@ -45,7 +45,7 @@ function renderPositionBar(pct) {
   return `0% |${left}o${right}| 100%`;
 }
 
-function formatSnapshotLine(snapshotAt, source) {
+function formatSnapshotLine(snapshotAt, source, staleWarnMs) {
   if (!snapshotAt) return null;
   const raw = String(snapshotAt);
   const iso = raw.includes("T") ? raw : raw.replace(" ", "T");
@@ -56,7 +56,7 @@ function formatSnapshotLine(snapshotAt, source) {
   if (String(source || "").toLowerCase() === "rpc") {
     warn = " ⚠️ RPC fallback used.";
   } else {
-    const stale = Date.now() - tsMs > SNAPSHOT_STALE_WARN_MS;
+    const stale = Date.now() - tsMs > staleWarnMs;
     warn = stale ? " ⚠️ Data may be stale." : "";
   }
   return `<t:${ts}:f>${warn}`;
@@ -100,8 +100,16 @@ function requireNumberEnv(name) {
   return n;
 }
 
-const SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SNAPSHOT_STALE_WARN_MIN");
-const SNAPSHOT_STALE_WARN_MS = Math.max(0, Math.floor(SNAPSHOT_STALE_WARN_MIN * 60 * 1000));
+const LOAN_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LOAN_SNAPSHOT_STALE_WARN_MIN");
+const LP_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LP_SNAPSHOT_STALE_WARN_MIN");
+const LOAN_SNAPSHOT_STALE_WARN_MS = Math.max(
+  0,
+  Math.floor(LOAN_SNAPSHOT_STALE_WARN_MIN * 60 * 1000)
+);
+const LP_SNAPSHOT_STALE_WARN_MS = Math.max(
+  0,
+  Math.floor(LP_SNAPSHOT_STALE_WARN_MIN * 60 * 1000)
+);
 
 // -----------------------------
 // LP debounce/cooldown config (STRICT)
@@ -333,7 +341,11 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
           inline: false,
         }
       );
-      const snapshotLine = formatSnapshotLine(meta?.snapshotAt, meta?.snapshotSource);
+      const snapshotLine = formatSnapshotLine(
+        meta?.snapshotAt,
+        meta?.snapshotSource,
+        LOAN_SNAPSHOT_STALE_WARN_MS
+      );
       if (snapshotLine) fields.push({ name: "Data captured", value: snapshotLine, inline: false });
       embed.addFields(fields);
 
@@ -414,7 +426,11 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
           inline: false,
         }
       );
-    const snapshotLine = formatSnapshotLine(meta?.snapshotAt, meta?.snapshotSource);
+    const snapshotLine = formatSnapshotLine(
+      meta?.snapshotAt,
+      meta?.snapshotSource,
+      LOAN_SNAPSHOT_STALE_WARN_MS
+    );
       if (snapshotLine) fields.push({ name: "Data captured", value: snapshotLine, inline: false });
       embed.addFields(fields);
 
@@ -585,7 +601,11 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
               { name: "Meaning", value: meaning, inline: false },
             ])
       );
-      const snapshotLine = formatSnapshotLine(meta?.snapshotAt, meta?.snapshotSource);
+      const snapshotLine = formatSnapshotLine(
+        meta?.snapshotAt,
+        meta?.snapshotSource,
+        LP_SNAPSHOT_STALE_WARN_MS
+      );
       if (snapshotLine) fields.push({ name: "Data captured", value: snapshotLine, inline: false });
       embed.addFields(fields);
 

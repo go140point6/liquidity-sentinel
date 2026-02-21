@@ -58,11 +58,20 @@ Derive ownership state from indexed events:
 node jobs/deriveNftStateFromEvents.js
 ```
 
+Default derive mode is incremental. It resumes from `derive_cursors.last_event_id` for the selected filter key.
+
 Derive only one contract/stream:
 
 ```bash
 node jobs/deriveNftStateFromEvents.js --chain=FLR --contract-id=1
 node jobs/deriveNftStateFromEvents.js --stream-id=2
+```
+
+Force full replay (ignore cursor) or reset cursor:
+
+```bash
+node jobs/deriveNftStateFromEvents.js --chain=FLR --full-replay=1
+node jobs/deriveNftStateFromEvents.js --chain=FLR --reset-cursor=1
 ```
 
 ## Validation
@@ -121,8 +130,14 @@ Outputs:
 
 - `data/metrics/index-integrity-latest.json` (latest one-run summary)
 - `data/metrics/index-integrity-runs.jsonl` (append-only history)
+- `data/metrics/index-cycle-summary.json` includes `skipped_count` for cycle-overlap skips.
 
 Each step is logged as `OK`/`FAIL` with elapsed ms. The process exits non-zero on any failed step.
+Integrity run coordination:
+
+- If `indexPipelineCycle` is active, integrity waits for it to finish (polling) before checks begin.
+- If the wait exceeds the max window, integrity records a skipped run summary instead of failing.
+- While integrity is active, `indexPipelineCycle` skips overlapping runs.
 
 ## Notes
 

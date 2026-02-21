@@ -17,6 +17,7 @@ DROP TABLE IF EXISTS lp_token_meta;
 DROP TABLE IF EXISTS chain_events;
 DROP TABLE IF EXISTS backfill_windows;
 DROP TABLE IF EXISTS backfill_jobs;
+DROP TABLE IF EXISTS derive_cursors;
 DROP TABLE IF EXISTS index_cursors;
 DROP TABLE IF EXISTS index_streams;
 
@@ -271,6 +272,12 @@ CREATE TABLE index_cursors (
   FOREIGN KEY (stream_id) REFERENCES index_streams(id) ON DELETE CASCADE
 );
 
+CREATE TABLE derive_cursors (
+  derive_key       TEXT PRIMARY KEY,
+  last_event_id    INTEGER NOT NULL DEFAULT 0 CHECK (last_event_id >= 0),
+  updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE backfill_jobs (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   stream_id    INTEGER NOT NULL,
@@ -302,6 +309,7 @@ CREATE TABLE backfill_windows (
 
 CREATE INDEX idx_index_streams_chain_enabled ON index_streams(chain_id, is_enabled);
 CREATE INDEX idx_index_streams_contract_event ON index_streams(contract_id, event_name);
+CREATE INDEX idx_derive_cursors_updated_at ON derive_cursors(updated_at);
 CREATE INDEX idx_backfill_jobs_stream_status ON backfill_jobs(stream_id, status, mode);
 CREATE INDEX idx_backfill_windows_job_block ON backfill_windows(job_id, from_block, to_block);
 

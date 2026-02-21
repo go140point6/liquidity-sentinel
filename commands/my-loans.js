@@ -22,8 +22,11 @@ function requireNumberEnv(name) {
   return n;
 }
 
-const SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SNAPSHOT_STALE_WARN_MIN");
-const SNAPSHOT_STALE_WARN_MS = Math.max(0, Math.floor(SNAPSHOT_STALE_WARN_MIN * 60 * 1000));
+const LOAN_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LOAN_SNAPSHOT_STALE_WARN_MIN");
+const LOAN_SNAPSHOT_STALE_WARN_MS = Math.max(
+  0,
+  Math.floor(LOAN_SNAPSHOT_STALE_WARN_MIN * 60 * 1000)
+);
 
 const REDEMP_DEBT_AHEAD_LOW_PCT = Number(process.env.REDEMP_DEBT_AHEAD_LOW_PCT);
 const REDEMP_DEBT_AHEAD_MED_PCT = Number(process.env.REDEMP_DEBT_AHEAD_MED_PCT);
@@ -233,7 +236,7 @@ module.exports = {
       if (snapshotTimes.length) {
         const latest = Math.max(...snapshotTimes);
         const ageMs = Date.now() - latest * 1000;
-        const stale = ageMs > SNAPSHOT_STALE_WARN_MS;
+        const stale = ageMs > LOAN_SNAPSHOT_STALE_WARN_MS;
         const warn = stale ? " ⚠️ Data may be stale." : "";
         descLines.push("");
         descLines.push(`Data captured: <t:${latest}:f>${warn}`);

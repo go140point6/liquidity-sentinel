@@ -47,7 +47,7 @@ module.exports = {
       script: "jobs/indexDailyIntegrity.js",
       interpreter: "node",
       autorestart: false,
-      cron_restart: "30 */4 * * *",
+      cron_restart: "37 */4 * * *",
       time: true,
       env: {
         NODE_ENV: "production",

@@ -37,6 +37,16 @@ function strArg(name) {
   return raw == null ? null : String(raw);
 }
 
+function boolArg(name) {
+  if (process.argv.includes(`--${name}`)) return 1;
+  const raw = process.argv.find((a) => a.startsWith(`--${name}=`))?.split("=")[1];
+  if (raw == null) return 0;
+  const v = String(raw).trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(v)) return 1;
+  if (["0", "false", "no", "n", "off"].includes(v)) return 0;
+  throw new Error(`--${name} must be boolean-like (1/0, true/false, yes/no)`);
+}
+
 function decodeTransfer(topics) {
   if (!Array.isArray(topics) || topics.length < 4) return null;
   try {
@@ -64,6 +74,15 @@ async function main() {
   const streamId = intArg("stream-id");
   const batchSizeArg = intArg("batch");
   const batchSize = Number.isInteger(batchSizeArg) && batchSizeArg > 0 ? batchSizeArg : 1000;
+  const fullReplay = boolArg("full-replay") === 1;
+  const resetCursor = boolArg("reset-cursor") === 1;
+
+  const deriveKey = [
+    "derive_nft",
+    chain || "ALL",
+    contractId == null ? "ALL" : String(contractId),
+    streamId == null ? "ALL" : String(streamId),
+  ].join(":");
 
   const db = new Database(DB_PATH);
   initSchema(db);
@@ -99,6 +118,21 @@ async function main() {
       AND e.id > ?
     ORDER BY e.id
     LIMIT ?
+  `);
+
+  const selCursor = db.prepare(`
+    SELECT last_event_id
+    FROM derive_cursors
+    WHERE derive_key = ?
+    LIMIT 1
+  `);
+
+  const upsertCursor = db.prepare(`
+    INSERT INTO derive_cursors (derive_key, last_event_id, updated_at)
+    VALUES (?, ?, datetime('now'))
+    ON CONFLICT(derive_key) DO UPDATE SET
+      last_event_id = excluded.last_event_id,
+      updated_at = datetime('now')
   `);
 
   const insTransfer = db.prepare(`
@@ -179,14 +213,20 @@ async function main() {
     return { transfersWritten, tokensWritten };
   });
 
-  let lastId = 0;
+  if (resetCursor) {
+    upsertCursor.run(deriveKey, 0);
+    logger.info(`[deriveNftStateFromEvents] cursor reset derive_key=${deriveKey}`);
+  }
+
+  const cursorRow = selCursor.get(deriveKey);
+  let lastId = fullReplay ? 0 : Math.max(0, Number(cursorRow?.last_event_id) || 0);
   let scanned = 0;
   let totalTransfersWritten = 0;
   let totalTokensWritten = 0;
 
   try {
     logger.info(
-      `[deriveNftStateFromEvents] start chain=${chain || "ALL"} contractId=${contractId ?? "ALL"} streamId=${streamId ?? "ALL"} batch=${batchSize}`
+      `[deriveNftStateFromEvents] start chain=${chain || "ALL"} contractId=${contractId ?? "ALL"} streamId=${streamId ?? "ALL"} batch=${batchSize} derive_key=${deriveKey} from_event_id=${lastId} full_replay=${fullReplay ? 1 : 0}`
     );
     for (;;) {
       const rows = selBatch.all(...argsBase, lastId, batchSize);
@@ -198,6 +238,7 @@ async function main() {
       totalTransfersWritten += transfersWritten;
       totalTokensWritten += tokensWritten;
       lastId = rows[rows.length - 1].id;
+      upsertCursor.run(deriveKey, lastId);
 
       logger.info(
         `[deriveNftStateFromEvents] batch size=${rows.length} scanned=${scanned} transfers_written=${totalTransfersWritten} tokens_written=${totalTokensWritten} last_event_id=${lastId}`
@@ -205,7 +246,7 @@ async function main() {
     }
 
     logger.info(
-      `[deriveNftStateFromEvents] DONE scanned=${scanned} transfers_written=${totalTransfersWritten} tokens_written=${totalTokensWritten}`
+      `[deriveNftStateFromEvents] DONE scanned=${scanned} transfers_written=${totalTransfersWritten} tokens_written=${totalTokensWritten} cursor_event_id=${lastId}`
     );
   } finally {
     db.close();

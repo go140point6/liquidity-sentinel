@@ -170,6 +170,12 @@ function initSchema(db) {
     FOREIGN KEY (stream_id) REFERENCES index_streams(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS derive_cursors (
+    derive_key       TEXT PRIMARY KEY,
+    last_event_id    INTEGER NOT NULL DEFAULT 0 CHECK (last_event_id >= 0),
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS backfill_jobs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     stream_id    INTEGER NOT NULL,
@@ -394,6 +400,7 @@ function initSchema(db) {
   CREATE INDEX IF NOT EXISTS idx_lp_snapshots_user           ON lp_position_snapshots(user_id);
   CREATE INDEX IF NOT EXISTS idx_index_streams_chain_enabled ON index_streams(chain_id, is_enabled);
   CREATE INDEX IF NOT EXISTS idx_index_streams_contract_event ON index_streams(contract_id, event_name);
+  CREATE INDEX IF NOT EXISTS idx_derive_cursors_updated_at ON derive_cursors(updated_at);
   CREATE INDEX IF NOT EXISTS idx_backfill_jobs_stream_status ON backfill_jobs(stream_id, status, mode);
   CREATE INDEX IF NOT EXISTS idx_backfill_windows_job_block ON backfill_windows(job_id, from_block, to_block);
   CREATE INDEX IF NOT EXISTS idx_chain_events_stream_block ON chain_events(stream_id, block_number, log_index);

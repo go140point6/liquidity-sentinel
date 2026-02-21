@@ -19,6 +19,12 @@ const { shortenAddress } = require("../../utils/ethers/shortenAddress");
 const { formatAddressLink } = require("../../utils/links");
 
 const DEFAULT_HEARTBEAT_TZ = "America/Los_Angeles";
+const EMBED_FIELD_VALUE_MAX = 1024;
+const FORCE_REFRESH_KEYS = [
+  "SCAN_FORCE_REFRESH_LOAN",
+  "SCAN_FORCE_REFRESH_LP",
+  "SCAN_FORCE_REFRESH_REDEMP",
+];
 const TZ_LIST = typeof Intl.supportedValuesOf === "function"
   ? Intl.supportedValuesOf("timeZone")
   : [
@@ -61,6 +67,46 @@ function formatHourLabel(hour) {
   const suffix = h >= 12 ? "PM" : "AM";
   const h12 = h % 12 === 0 ? 12 : h % 12;
   return `${String(h12).padStart(2, "0")}:00 ${suffix}`;
+}
+
+function chunkLinesForEmbed(lines, maxLen = EMBED_FIELD_VALUE_MAX) {
+  const chunks = [];
+  let cur = "";
+  for (const raw of lines || []) {
+    const line = String(raw || "");
+    if (!line) continue;
+
+    if (!cur) {
+      cur = line.slice(0, maxLen);
+      continue;
+    }
+
+    if (cur.length + 1 + line.length <= maxLen) {
+      cur += `\n${line}`;
+      continue;
+    }
+
+    chunks.push(cur);
+    cur = line.slice(0, maxLen);
+  }
+  if (cur) chunks.push(cur);
+  return chunks;
+}
+
+function queueScanForceRefresh(db, chainId) {
+  const chain = String(chainId || "").toUpperCase();
+  if (!chain) return;
+  const upsert = db.prepare(`
+    INSERT INTO global_params (chain_id, param_key, value_text, source, fetched_at)
+    VALUES (?, ?, '1', 'my-wallets', datetime('now'))
+    ON CONFLICT(chain_id, param_key) DO UPDATE SET
+      value_text = '1',
+      source = 'my-wallets',
+      fetched_at = datetime('now')
+  `);
+  for (const key of FORCE_REFRESH_KEYS) {
+    upsert.run(chain, key);
+  }
 }
 
 // ===================== UI LOCK START =====================
@@ -131,7 +177,11 @@ function buildWalletsEmbed({ discordName, wallets, heartbeatHour, heartbeatTz, h
       const lpMode = w.lp_alerts_status_only === 1 ? "LP alerts: status only" : "LP alerts: status + tier";
       return `• ${label}${walletLink} _(${lpMode})_`;
     });
-    embed.addFields({ name: chain, value: lines.join("\n"), inline: false });
+    const chunks = chunkLinesForEmbed(lines);
+    for (let i = 0; i < chunks.length; i += 1) {
+      const suffix = chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : "";
+      embed.addFields({ name: `${chain}${suffix}`, value: chunks[i], inline: false });
+    }
   }
 
   return embed;
@@ -552,6 +602,12 @@ async function handleMyWalletsInteraction(interaction) {
 
       try {
         getOrCreateWalletId(db, { userId, chainId, addressInput, label: labelInput });
+        try {
+          queueScanForceRefresh(db, chainId);
+          logger.info(`[my-wallets-ui] queued scan force-refresh flags for chain=${chainId}`);
+        } catch (flagErr) {
+          logger.warn(`[my-wallets-ui] failed to queue scan force-refresh flags: ${flagErr?.message || flagErr}`);
+        }
       } catch (err) {
         await interaction.editReply({ content: `❌ Could not save wallet: ${err.message}` }).catch(() => {});
         return true;
