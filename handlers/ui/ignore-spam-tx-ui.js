@@ -17,6 +17,7 @@ const { ephemeralFlags } = require("../../utils/discord/ephemerals");
 const { shortenAddress } = require("../../utils/ethers/shortenAddress");
 const { shortenTroveId } = require("../../utils/ethers/shortenTroveId");
 const { formatAddressLink, formatLpPositionLink } = require("../../utils/links");
+const EMBED_FIELD_VALUE_MAX = 1024;
 
 const EMBED_FIELD_VALUE_MAX = 1024;
 
@@ -72,6 +73,30 @@ function releaseLock(actorId, seq) {
 
 function kindLabelFromContractKind(kind) {
   return kind === "LP_NFT" ? "LP" : kind === "LOAN_NFT" ? "LOAN" : String(kind || "UNKNOWN");
+}
+
+function chunkLinesForEmbed(lines, maxLen = EMBED_FIELD_VALUE_MAX) {
+  const chunks = [];
+  let cur = "";
+  for (const raw of lines || []) {
+    const line = String(raw || "");
+    if (!line) continue;
+
+    if (!cur) {
+      cur = line.slice(0, maxLen);
+      continue;
+    }
+
+    if (cur.length + 1 + line.length <= maxLen) {
+      cur += `\n${line}`;
+      continue;
+    }
+
+    chunks.push(cur);
+    cur = line.slice(0, maxLen);
+  }
+  if (cur) chunks.push(cur);
+  return chunks;
 }
 
 // ---------- ACK helpers ----------
