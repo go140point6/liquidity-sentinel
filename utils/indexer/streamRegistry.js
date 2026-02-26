@@ -3,7 +3,7 @@ const { ethers } = require("ethers");
 const TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
 
 function selectContracts(db, { chainId = null, kind = null, contractKey = null } = {}) {
-  const where = ["c.is_enabled = 1", "c.kind IN ('LP_NFT','LOAN_NFT')"];
+  const where = ["c.is_enabled = 1", "c.kind IN ('LP_NFT','LP_ALM','LOAN_NFT')"];
   const args = [];
 
   if (chainId) {

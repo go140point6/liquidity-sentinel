@@ -11,6 +11,8 @@ const state = {
   lpRangeShiftPct: 0, // fraction of position width (e.g., 0.25 = 25%)
   debtAheadOffsetPp: 0, // additive percentage-points to debt-ahead pct
   debtAheadOffsetByProtocol: {}, // per-protocol additive percentage-points
+  almFlowByToken: {}, // tokenId(lower) => { delta0, delta1 }
+  almFlowAll: { delta0: 0, delta1: 0 }, // applies to all ALM positions
 };
 
 const debtAheadThresholds = {
@@ -38,14 +40,27 @@ function resetTestOffsets() {
   state.lpRangeShiftPct = 0;
   state.debtAheadOffsetPp = 0;
   state.debtAheadOffsetByProtocol = {};
+  state.almFlowByToken = {};
+  state.almFlowAll = { delta0: 0, delta1: 0 };
 }
 
 function getTestOffsets() {
-  return { ...state };
+  return {
+    ...state,
+    almFlowByToken: { ...(state.almFlowByToken || {}) },
+    almFlowAll: { ...(state.almFlowAll || { delta0: 0, delta1: 0 }) },
+  };
 }
 
 function getLastSeenBases() {
   return { ...lastSeen };
+}
+
+function normalizeTokenId(tokenId) {
+  if (tokenId == null) return null;
+  const t = String(tokenId).trim().toLowerCase();
+  if (!t) return null;
+  return t;
 }
 
 function normalizeProtocol(protocol) {
@@ -98,6 +113,99 @@ function adjustLpRangeShiftPct(deltaPct) {
   const n = Number(deltaPct);
   if (!Number.isFinite(n)) return;
   state.lpRangeShiftPct += n;
+}
+
+function getAlmFlowGlobal() {
+  return {
+    delta0: Number(state.almFlowAll?.delta0 || 0),
+    delta1: Number(state.almFlowAll?.delta1 || 0),
+  };
+}
+
+function getAlmFlowDeltaForToken(tokenId) {
+  const key = normalizeTokenId(tokenId);
+  if (!key) return { delta0: 0, delta1: 0 };
+  const e = state.almFlowByToken?.[key];
+  return {
+    delta0: Number(e?.delta0 || 0),
+    delta1: Number(e?.delta1 || 0),
+  };
+}
+
+function adjustAlmFlowGlobal(delta0 = 0, delta1 = 0) {
+  const d0 = Number(delta0);
+  const d1 = Number(delta1);
+  if (!Number.isFinite(d0) || !Number.isFinite(d1)) return;
+  const prev = state.almFlowAll || { delta0: 0, delta1: 0 };
+  state.almFlowAll = {
+    delta0: Number(prev.delta0 || 0) + d0,
+    delta1: Number(prev.delta1 || 0) + d1,
+  };
+}
+
+function adjustAlmFlowDelta(tokenId, delta0 = 0, delta1 = 0) {
+  const key = normalizeTokenId(tokenId);
+  if (!key) return;
+  const d0 = Number(delta0);
+  const d1 = Number(delta1);
+  if (!Number.isFinite(d0) || !Number.isFinite(d1)) return;
+  const prev = state.almFlowByToken?.[key] || { delta0: 0, delta1: 0 };
+  state.almFlowByToken[key] = {
+    delta0: Number(prev.delta0 || 0) + d0,
+    delta1: Number(prev.delta1 || 0) + d1,
+  };
+}
+
+function clearAlmFlowGlobal() {
+  state.almFlowAll = { delta0: 0, delta1: 0 };
+}
+
+function clearAlmFlowDelta(tokenId = null) {
+  if (tokenId == null) {
+    state.almFlowByToken = {};
+    return;
+  }
+  const key = normalizeTokenId(tokenId);
+  if (!key) return;
+  delete state.almFlowByToken[key];
+}
+
+function applyAlmFlowOverride(summary) {
+  if (!summary || String(summary.positionModel || "").toUpperCase() !== "ALM") return summary;
+  const key = normalizeTokenId(summary.tokenId || summary.nftContract);
+  const per = key ? state.almFlowByToken?.[key] : null;
+  const all = state.almFlowAll || { delta0: 0, delta1: 0 };
+
+  const d0 = Number(all.delta0 || 0) + Number(per?.delta0 || 0);
+  const d1 = Number(all.delta1 || 0) + Number(per?.delta1 || 0);
+  if (!Number.isFinite(d0) && !Number.isFinite(d1)) return summary;
+  if ((Number.isFinite(d0) ? d0 : 0) === 0 && (Number.isFinite(d1) ? d1 : 0) === 0) return summary;
+
+  const out = { ...summary };
+
+  if (Number.isFinite(d0)) {
+    const base0 = Number(out.amount0);
+    if (Number.isFinite(base0)) out.amount0 = base0 + d0;
+  }
+  if (Number.isFinite(d1)) {
+    const base1 = Number(out.amount1);
+    if (Number.isFinite(base1)) out.amount1 = base1 + d1;
+  }
+
+  // Simulate add/remove as capital flow: adjust flow line only.
+  if (out.almSinceStart && typeof out.almSinceStart === "object") {
+    if (Number.isFinite(d0)) {
+      const f0 = Number(out.almSinceStart.externalFlowAmount0);
+      if (Number.isFinite(f0)) out.almSinceStart.externalFlowAmount0 = f0 + d0;
+    }
+    if (Number.isFinite(d1)) {
+      const f1 = Number(out.almSinceStart.externalFlowAmount1);
+      if (Number.isFinite(f1)) out.almSinceStart.externalFlowAmount1 = f1 + d1;
+    }
+  }
+
+  out.almSyntheticFlow = { tokenId: key || "*", delta0: d0, delta1: d1 };
+  return out;
 }
 
 function adjustDebtAheadOffsetPp(deltaPp, protocol) {
@@ -237,6 +345,24 @@ function logRunApplied() {
     );
   }
 
+  const g = state.almFlowAll || { delta0: 0, delta1: 0 };
+  if (Number(g.delta0 || 0) !== 0 || Number(g.delta1 || 0) !== 0) {
+    logger.debug(
+      `[test-alerts] Run ALM synthetic flow (global): delta0=${Number(g.delta0 || 0)} delta1=${Number(g.delta1 || 0)}`
+    );
+  }
+
+  const almFlowEntries = Object.entries(state.almFlowByToken || {});
+  if (almFlowEntries.length) {
+    for (const [tokenId, flow] of almFlowEntries) {
+      const d0 = Number(flow?.delta0 || 0);
+      const d1 = Number(flow?.delta1 || 0);
+      logger.debug(
+        `[test-alerts] Run ALM synthetic flow: token=${tokenId} delta0=${d0} delta1=${d1}`
+      );
+    }
+  }
+
   const debtEntries = Object.entries(lastSeen.debtAheadPctByProtocol || {});
   if (debtEntries.length) {
     const fmt = new Intl.NumberFormat("en-US", {
@@ -272,14 +398,21 @@ module.exports = {
   getIrOffsetPpForProtocol,
   getLiqPriceMultiplierForProtocol,
   getDebtAheadOffsetPpForProtocol,
+  getAlmFlowDeltaForToken,
+  getAlmFlowGlobal,
   adjustGlobalIrOffsetPp,
   adjustLiqPriceMultiplier,
   adjustLpRangeShiftPct,
   adjustDebtAheadOffsetPp,
+  adjustAlmFlowDelta,
+  adjustAlmFlowGlobal,
+  clearAlmFlowDelta,
+  clearAlmFlowGlobal,
   applyGlobalIrOffset,
   applyPriceMultiplier,
   applyLpTickShift,
   applyDebtAheadOffsetPct,
+  applyAlmFlowOverride,
   setDebtAheadBase,
   setPriceBase,
   setDebtAheadTierThresholds,

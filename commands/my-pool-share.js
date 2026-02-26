@@ -35,6 +35,22 @@ function computePoolSharePct(liquidityRaw, poolLiquidityRaw) {
   }
 }
 
+function normalizeRangeStatus(status) {
+  const s = String(status || "").toUpperCase().replace(/\s+/g, "_");
+  if (s === "OUT_OF_RANGE" || s === "IN_RANGE" || s === "INACTIVE" || s === "UNKNOWN") return s;
+  return "UNKNOWN";
+}
+
+function getDisplayedPoolShare(summary) {
+  const rangeStatus = normalizeRangeStatus(summary?.rangeStatus || summary?.status);
+  if (rangeStatus === "OUT_OF_RANGE") {
+    return { pct: 0, oor: true };
+  }
+  const raw = computePoolSharePct(summary?.liquidity, summary?.poolLiquidity);
+  if (!Number.isFinite(raw)) return { pct: null, oor: false };
+  return { pct: Math.max(0, Math.min(raw, 100)), oor: false };
+}
+
 function lpPoolKey(summary) {
   const chain = summary.chainId || "?";
   const protocol = summary.protocol || "UNKNOWN";
@@ -101,10 +117,10 @@ module.exports = {
       const totals = new Map();
       const meta = new Map();
       for (const s of active) {
-        const share = computePoolSharePct(s.liquidity, s.poolLiquidity);
-        if (share == null || !Number.isFinite(share)) continue;
+        const shareInfo = getDisplayedPoolShare(s);
+        if (shareInfo.pct == null || !Number.isFinite(shareInfo.pct)) continue;
         const key = lpPoolKey(s);
-        totals.set(key, (totals.get(key) || 0) + share);
+        totals.set(key, (totals.get(key) || 0) + shareInfo.pct);
         if (!meta.has(key)) {
           const pair =
             s.pairLabel ||

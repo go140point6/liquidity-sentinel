@@ -4,6 +4,13 @@ All notable, user-facing changes are documented here.
 
 ---
 
+## [2026-02-26]
+
+### Changed
+- /my-lp ALM sections now include a clear strategy verdict (gain/loss/flat vs just holding) while still showing current vault share value.
+- Wallet labels are now shown in /my-lp, /my-loans, and daily heartbeat entries when available.
+- Pool-share display now avoids misleading out-of-range values by showing 0.00% (OOR).
+
 ## [2026-02-12]
 
 ### Added

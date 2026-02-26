@@ -87,6 +87,22 @@ function computePoolSharePct(liquidityRaw, poolLiquidityRaw) {
   }
 }
 
+function normalizeRangeStatus(status) {
+  const s = String(status || "").toUpperCase().replace(/\s+/g, "_");
+  if (s === "OUT_OF_RANGE" || s === "IN_RANGE" || s === "INACTIVE" || s === "UNKNOWN") return s;
+  return "UNKNOWN";
+}
+
+function getDisplayedPoolShare(summary) {
+  const rangeStatus = normalizeRangeStatus(summary?.rangeStatus || summary?.status);
+  if (rangeStatus === "OUT_OF_RANGE") {
+    return { pct: 0, oor: true };
+  }
+  const raw = computePoolSharePct(summary?.liquidity, summary?.poolLiquidity);
+  if (!Number.isFinite(raw)) return { pct: null, oor: false };
+  return { pct: Math.max(0, Math.min(raw, 100)), oor: false };
+}
+
 function fmtNum5(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return "n/a";
   return fmt5.format(n);
@@ -100,6 +116,12 @@ function fmtNum2(n) {
 function fmtPct2(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return "n/a";
   return `${n.toFixed(2)}%`;
+}
+
+function formatTokenAmountSigned(n) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return null;
+  const out = formatTokenAmount(n);
+  return n > 0 ? `+${out}` : out;
 }
 
 function formatTokenAmount(n) {
@@ -180,6 +202,7 @@ function formatLoanField(s, priceCache) {
   if (s.owner) {
     const walletText = formatAddressLink(s.chainId, s.owner) || shortenAddress(s.owner);
     lines.push(`Wallet: ${walletText}`);
+    if (s.walletLabel) lines.push(`Label: **${s.walletLabel}**`);
   }
 
   const status = s.status || "UNKNOWN";
@@ -299,6 +322,7 @@ function formatLpField(s, priceCache) {
   if (s.owner) {
     const walletText = formatAddressLink(s.chainId, s.owner) || shortenAddress(s.owner);
     parts.push(`Wallet: ${walletText}`);
+    if (s.walletLabel) parts.push(`Label: **${s.walletLabel}**`);
   }
 
   const chainId = String(s.chainId || "").toUpperCase();
@@ -391,6 +415,7 @@ function formatAlmLpField(s, priceCache) {
   if (s.owner) {
     const walletText = formatAddressLink(s.chainId, s.owner) || shortenAddress(s.owner);
     parts.push(`Wallet: ${walletText}`);
+    if (s.walletLabel) parts.push(`Label: **${s.walletLabel}**`);
   }
 
   const chainId = String(s.chainId || "").toUpperCase();
@@ -414,15 +439,32 @@ function formatAlmLpField(s, priceCache) {
     priceQuote = priceBase / price;
   }
 
-  const sharePct = Number.isFinite(s.almSharePct)
+  const sharePctRaw = Number.isFinite(s.almSharePct)
     ? Number(s.almSharePct)
     : computePoolSharePct(s.liquidity, s.poolLiquidity);
+  const sharePct = Number.isFinite(sharePctRaw)
+    ? Math.max(0, Math.min(sharePctRaw, 100))
+    : null;
   if (Number.isFinite(sharePct)) {
     parts.push(`Your share: **${sharePct.toFixed(2)}%**`);
   }
 
+
   const sym0 = s.token0Symbol || "token0";
   const sym1 = s.token1Symbol || "token1";
+
+  if (
+    typeof s.vaultTotalAmount0 === "number" &&
+    Number.isFinite(s.vaultTotalAmount0) &&
+    typeof s.vaultTotalAmount1 === "number" &&
+    Number.isFinite(s.vaultTotalAmount1)
+  ) {
+    parts.push(
+      `Vault total: ${formatTokenAmount(s.vaultTotalAmount0)} ${sym0}, ` +
+        `${formatTokenAmount(s.vaultTotalAmount1)} ${sym1}`
+    );
+  }
+
   if (
     typeof s.amount0 === "number" &&
     Number.isFinite(s.amount0) &&
@@ -437,18 +479,49 @@ function formatAlmLpField(s, priceCache) {
     );
   }
 
-  if (
-    typeof s.vaultTotalAmount0 === "number" &&
-    Number.isFinite(s.vaultTotalAmount0) &&
-    typeof s.vaultTotalAmount1 === "number" &&
-    Number.isFinite(s.vaultTotalAmount1)
-  ) {
-    parts.push(
-      `Vault total: ${formatTokenAmount(s.vaultTotalAmount0)} ${sym0}, ` +
-        `${formatTokenAmount(s.vaultTotalAmount1)} ${sym1}`
-    );
-  }
+  if (s.almSinceStart) {
+    const d0Num = Number(s.almSinceStart.strategyDeltaAmount0);
+    const d1Num = Number(s.almSinceStart.strategyDeltaAmount1);
+    const cur0 = Number(s.amount0);
+    const cur1 = Number(s.amount1);
 
+    const hold0Num = Number.isFinite(cur0) && Number.isFinite(d0Num) ? cur0 - d0Num : null;
+    const hold1Num = Number.isFinite(cur1) && Number.isFinite(d1Num) ? cur1 - d1Num : null;
+    if (Number.isFinite(hold0Num) || Number.isFinite(hold1Num)) {
+      const h0Usd = Number.isFinite(hold0Num) && Number.isFinite(priceBase) ? fmtUsd(hold0Num * priceBase) : null;
+      const h1Usd = Number.isFinite(hold1Num) && Number.isFinite(priceQuote) ? fmtUsd(hold1Num * priceQuote) : null;
+      parts.push(
+        `Your token values just holding: ${Number.isFinite(hold0Num) ? `${formatTokenAmount(hold0Num)} ${sym0}${h0Usd ? ` (${h0Usd})` : ""}` : `- ${sym0}`}, ` +
+          `${Number.isFinite(hold1Num) ? `${formatTokenAmount(hold1Num)} ${sym1}${h1Usd ? ` (${h1Usd})` : ""}` : `- ${sym1}`}`
+      );
+    }
+
+    const needsBase = Number.isFinite(d0Num) && d0Num !== 0;
+    const needsQuote = Number.isFinite(d1Num) && d1Num !== 0;
+    if ((needsBase && !Number.isFinite(priceBase)) || (needsQuote && !Number.isFinite(priceQuote))) {
+      logger.warn(
+        `[dailyHeartbeat][ALM][USD_MISSING] chain=${s.chainId || "?"} protocol=${s.protocol || "UNKNOWN"} token=${s.tokenId || "?"} ` +
+        `pair=${sym0}/${sym1} price_${sym0}=${Number.isFinite(priceBase) ? priceBase : "n/a"} ` +
+        `price_${sym1}=${Number.isFinite(priceQuote) ? priceQuote : "n/a"}`
+      );
+    }
+
+    const canPriceUsd = (!needsBase || Number.isFinite(priceBase)) && (!needsQuote || Number.isFinite(priceQuote));
+    if (canPriceUsd) {
+      const usdDelta =
+        (Number.isFinite(d0Num) && Number.isFinite(priceBase) ? d0Num * priceBase : 0) +
+        (Number.isFinite(d1Num) && Number.isFinite(priceQuote) ? d1Num * priceQuote : 0);
+      if (usdDelta > 0) {
+        parts.push(`Strategy verdict: 📈 Gain of ${fmtUsd(usdDelta)} vs. just holding`);
+      } else if (usdDelta < 0) {
+        parts.push(`Strategy verdict: 📉 Loss of ${fmtUsd(Math.abs(usdDelta))} vs. just holding`);
+      } else {
+        parts.push(`Strategy verdict: ⚖️ Flat vs. just holding`);
+      }
+    } else {
+      parts.push(`Strategy verdict: ⚪ USD comparison unavailable (missing price)`);
+    }
+  }
   return { name: title, value: parts.join("\n") };
 }
 
@@ -594,10 +667,10 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
   const poolShareTotals = new Map();
   const poolMeta = new Map();
   for (const s of activeLpSummaries) {
-    const share = computePoolSharePct(s.liquidity, s.poolLiquidity);
-    if (share == null || !Number.isFinite(share)) continue;
+    const shareInfo = getDisplayedPoolShare(s);
+    if (shareInfo.pct == null || !Number.isFinite(shareInfo.pct)) continue;
     const key = lpPoolKey(s);
-    poolShareTotals.set(key, (poolShareTotals.get(key) || 0) + share);
+    poolShareTotals.set(key, (poolShareTotals.get(key) || 0) + shareInfo.pct);
     if (!poolMeta.has(key)) {
       const pair =
         s.pairLabel ||

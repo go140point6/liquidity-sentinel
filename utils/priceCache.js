@@ -80,6 +80,13 @@ function upsertPrice(db, chainId, symbol, priceUsd, source) {
       fetched_at = datetime('now')
   `
   ).run(chainId, symbol, priceUsd, source);
+
+  db.prepare(
+    `
+    INSERT INTO price_cache_history (chain_id, symbol, price_usd, source, fetched_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
+  `
+  ).run(chainId, symbol, priceUsd, source);
 }
 
 async function refreshPriceCache(db, symbolsByChain) {

@@ -105,7 +105,7 @@ const { getProviderForChain } = require("../utils/ethers/providers");
 const { acquireLock, releaseLock } = require("../utils/lock");
 const { getAlmPeripheryAddress } = require("../utils/almConfig");
 const { handleLpRangeAlert } = require("./alertEngine");
-const { applyLpTickShift, logRunApplied } = require("./testOffsets");
+const { applyLpTickShift, applyAlmFlowOverride, logRunApplied } = require("./testOffsets");
 const logger = require("../utils/logger");
 
 function requireNumberEnv(name) {
@@ -726,7 +726,9 @@ async function summarizeSteerAlmPosition(provider, chainId, protocol, row, optio
     vaultTotalAmount0: Number(ethers.formatUnits(base0Raw, dec0)),
     vaultTotalAmount1: Number(ethers.formatUnits(base1Raw, dec1)),
   };
-  return attachAlmRolling24h(out, row);
+  const withFlow = applyAlmFlowOverride(out);
+  const with24h = attachAlmRolling24h(withFlow, row);
+  return await attachAlmSinceStart(with24h, row, { provider, chainId, vaultAddr });
 }
 
 let _lpSnapshotStmt = null;
@@ -797,6 +799,309 @@ function computePoolSharePct(liquidityRaw, poolLiquidityRaw) {
   } catch {
     return null;
   }
+}
+
+let _selAlmBaselineStmt = null;
+let _insAlmBaselineStmt = null;
+let _selAlmFlowsForOwnerStmt = null;
+
+function getAlmBaseline({ userId, walletId, contractId, tokenId }) {
+  const db = getDb();
+  if (!_selAlmBaselineStmt) {
+    _selAlmBaselineStmt = db.prepare(`
+      SELECT
+        baseline_snapshot_at,
+        baseline_amount0,
+        baseline_amount1,
+        baseline_shares_raw,
+        baseline_share_pct
+      FROM alm_position_baselines
+      WHERE user_id = ?
+        AND wallet_id = ?
+        AND contract_id = ?
+        AND token_id = ?
+      LIMIT 1
+    `);
+  }
+  return _selAlmBaselineStmt.get(userId, walletId, contractId, String(tokenId));
+}
+
+function insertAlmBaseline(row, summary, payload) {
+  const db = getDb();
+  if (!_insAlmBaselineStmt) {
+    _insAlmBaselineStmt = db.prepare(`
+      INSERT OR IGNORE INTO alm_position_baselines (
+        user_id, wallet_id, contract_id, token_id,
+        chain_id, protocol, token0_symbol, token1_symbol,
+        baseline_snapshot_at, baseline_amount0, baseline_amount1,
+        baseline_shares_raw, baseline_share_pct
+      ) VALUES (
+        @user_id, @wallet_id, @contract_id, @token_id,
+        @chain_id, @protocol, @token0_symbol, @token1_symbol,
+        @baseline_snapshot_at, @baseline_amount0, @baseline_amount1,
+        @baseline_shares_raw, @baseline_share_pct
+      )
+    `);
+  }
+
+  _insAlmBaselineStmt.run({
+    user_id: row.userId,
+    wallet_id: row.walletId,
+    contract_id: row.contractId,
+    token_id: String(summary?.tokenId || row.tokenId || ""),
+    chain_id: String(summary?.chainId || row.chainId || "").toUpperCase(),
+    protocol: String(summary?.protocol || row.protocol || "UNKNOWN_PROTOCOL"),
+    token0_symbol: summary?.token0Symbol || null,
+    token1_symbol: summary?.token1Symbol || null,
+    baseline_snapshot_at: String(payload.baselineAt || new Date().toISOString()),
+    baseline_amount0: payload.amount0 == null ? null : Number(payload.amount0),
+    baseline_amount1: payload.amount1 == null ? null : Number(payload.amount1),
+    baseline_shares_raw: String(payload.sharesRaw || "0"),
+    baseline_share_pct: payload.sharePct == null ? null : Number(payload.sharePct),
+  });
+}
+
+function findFirstPositiveShareFromFlows(row) {
+  const db = getDb();
+  if (!_selAlmFlowsForOwnerStmt) {
+    _selAlmFlowsForOwnerStmt = db.prepare(`
+      SELECT
+        event_id,
+        block_number,
+        tx_hash,
+        log_index,
+        from_lower,
+        to_lower,
+        amount_raw
+      FROM alm_share_flows
+      WHERE contract_id = ?
+        AND (from_lower = ? OR to_lower = ?)
+      ORDER BY block_number, log_index, event_id
+    `);
+  }
+
+  const ownerLower = String(row.owner || "").toLowerCase();
+  if (!ownerLower || ownerLower.length !== 42) return null;
+
+  const rows = _selAlmFlowsForOwnerStmt.all(row.contractId, ownerLower, ownerLower);
+  if (!rows.length) return null;
+
+  let shares = 0n;
+  for (const r of rows) {
+    let amount = 0n;
+    try {
+      amount = BigInt(String(r.amount_raw || "0"));
+    } catch {
+      continue;
+    }
+    const prev = shares;
+    if (String(r.to_lower || "").toLowerCase() === ownerLower) shares += amount;
+    if (String(r.from_lower || "").toLowerCase() === ownerLower) shares -= amount;
+    if (prev <= 0n && shares > 0n) {
+      return {
+        blockNumber: Number(r.block_number),
+        txHash: String(r.tx_hash || ""),
+        sharesRaw: shares.toString(),
+      };
+    }
+  }
+
+  return null;
+}
+
+async function loadSteerVaultBaseAtBlock(provider, chainId, vaultAddr, blockTag) {
+  const peripheryAddr = getSteerPeripheryAddress(chainId);
+  if (!peripheryAddr) {
+    throw new Error(`Missing Steer periphery address for chain ${chainId} (check data/alm_contracts.json)`);
+  }
+
+  const periphery = new ethers.Contract(peripheryAddr, steerPeripheryAbi, provider);
+  const vaultToken = new ethers.Contract(vaultAddr, steerVaultErc20Abi, provider);
+
+  let details;
+  try {
+    details = await periphery.algebraVaultDetailsByAddress(vaultAddr, { blockTag });
+  } catch (_) {
+    details = await periphery.vaultDetailsByAddress(vaultAddr, { blockTag });
+  }
+
+  let totalSupplyRaw = details.totalLPTokensIssued != null ? BigInt(details.totalLPTokensIssued) : 0n;
+  if (!(totalSupplyRaw > 0n)) {
+    totalSupplyRaw = BigInt(await vaultToken.totalSupply({ blockTag }));
+  }
+
+  return { details, totalSupplyRaw };
+}
+
+async function ensureAlmBaselineFromFlows(summary, row, ctx = {}) {
+  const tokenId = String(summary.tokenId || row.tokenId || "");
+  let baseline = getAlmBaseline({
+    userId: row.userId,
+    walletId: row.walletId,
+    contractId: row.contractId,
+    tokenId,
+  });
+  if (baseline) return baseline;
+
+  const flowStart = findFirstPositiveShareFromFlows(row);
+  let inserted = false;
+
+  if (flowStart && flowStart.sharesRaw) {
+    try {
+      const sharesRaw = String(flowStart.sharesRaw);
+      const shares = BigInt(sharesRaw);
+      if (shares > 0n && ctx.provider && ctx.chainId && ctx.vaultAddr) {
+        const hist = await loadSteerVaultBaseAtBlock(
+          ctx.provider,
+          ctx.chainId,
+          ctx.vaultAddr,
+          flowStart.blockNumber
+        );
+        const totalSupplyRaw = BigInt(hist.totalSupplyRaw || 0);
+        const dec0 = Number(hist.details.token0Decimals || summary.dec0 || 18);
+        const dec1 = Number(hist.details.token1Decimals || summary.dec1 || 18);
+        const base0Raw = BigInt(hist.details.token0Balance || 0);
+        const base1Raw = BigInt(hist.details.token1Balance || 0);
+
+        let amount0 = null;
+        let amount1 = null;
+        let sharePct = null;
+
+        if (totalSupplyRaw > 0n) {
+          const user0Raw = (shares * base0Raw) / totalSupplyRaw;
+          const user1Raw = (shares * base1Raw) / totalSupplyRaw;
+          amount0 = Number(ethers.formatUnits(user0Raw, dec0));
+          amount1 = Number(ethers.formatUnits(user1Raw, dec1));
+          sharePct = Number((shares * 10000n) / totalSupplyRaw) / 100;
+        }
+
+        let baselineAt = new Date().toISOString();
+        try {
+          const blk = await ctx.provider.getBlock(flowStart.blockNumber);
+          if (blk && Number.isFinite(Number(blk.timestamp))) {
+            baselineAt = new Date(Number(blk.timestamp) * 1000).toISOString();
+          }
+        } catch (_) {}
+
+        insertAlmBaseline(row, summary, {
+          baselineAt,
+          amount0,
+          amount1,
+          sharesRaw,
+          sharePct,
+        });
+        inserted = true;
+      }
+    } catch (_) {}
+  }
+
+  if (!inserted) {
+    const sharesRaw = String(summary?.liquidity || "0");
+    let shares = 0n;
+    try {
+      shares = BigInt(sharesRaw);
+    } catch {
+      shares = 0n;
+    }
+    const amount0 = toFiniteNumber(summary?.amount0);
+    const amount1 = toFiniteNumber(summary?.amount1);
+    const sharePct = toFiniteNumber(
+      summary?.almSharePct ?? computePoolSharePct(summary?.liquidity, summary?.poolLiquidity)
+    );
+    if (shares > 0n && amount0 != null && amount1 != null) {
+      insertAlmBaseline(row, summary, {
+        baselineAt: new Date().toISOString(),
+        amount0,
+        amount1,
+        sharesRaw,
+        sharePct,
+      });
+    }
+  }
+
+  return getAlmBaseline({
+    userId: row.userId,
+    walletId: row.walletId,
+    contractId: row.contractId,
+    tokenId,
+  });
+}
+
+async function attachAlmSinceStart(summary, row, ctx = {}) {
+  if (!summary || summary.positionModel !== "ALM" || !row) return summary;
+
+  const baseline = await ensureAlmBaselineFromFlows(summary, row, ctx);
+  if (!baseline) return summary;
+
+  const base0 = toFiniteNumber(baseline.baseline_amount0);
+  const base1 = toFiniteNumber(baseline.baseline_amount1);
+  const baseSharePct = toFiniteNumber(baseline.baseline_share_pct);
+  const curr0 = toFiniteNumber(summary.amount0);
+  const curr1 = toFiniteNumber(summary.amount1);
+  const currSharePct = toFiniteNumber(
+    summary.almSharePct ?? computePoolSharePct(summary.liquidity, summary.poolLiquidity)
+  );
+  const baselineMs = parseSnapshotMs(baseline.baseline_snapshot_at);
+  const hours = Number.isFinite(baselineMs)
+    ? Math.max(0, (Date.now() - baselineMs) / (60 * 60 * 1000))
+    : null;
+
+  let externalFlow0 = null;
+  let externalFlow1 = null;
+  let strategyDelta0 = null;
+  let strategyDelta1 = null;
+
+  try {
+    const baselineSharesRaw = String(baseline.baseline_shares_raw || "0");
+    const currentSharesRaw = String(summary.liquidity || "0");
+    const poolLiqRaw = String(summary.poolLiquidity || "0");
+
+    const baselineShares = BigInt(baselineSharesRaw);
+    const currentShares = BigInt(currentSharesRaw);
+    const poolLiq = BigInt(poolLiqRaw);
+
+    const vaultTotal0 = toFiniteNumber(summary.vaultTotalAmount0);
+    const vaultTotal1 = toFiniteNumber(summary.vaultTotalAmount1);
+
+    if (poolLiq > 0n && vaultTotal0 != null && vaultTotal1 != null) {
+      const flowShares = currentShares - baselineShares;
+      const flowRatio = Number(flowShares) / Number(poolLiq);
+
+      if (Number.isFinite(flowRatio)) {
+        externalFlow0 = vaultTotal0 * flowRatio;
+        externalFlow1 = vaultTotal1 * flowRatio;
+      }
+    }
+
+    const syntheticFlow = summary.almSyntheticFlow || null;
+    if (syntheticFlow) {
+      const sd0 = Number(syntheticFlow.delta0);
+      const sd1 = Number(syntheticFlow.delta1);
+      if (Number.isFinite(sd0)) externalFlow0 = (externalFlow0 || 0) + sd0;
+      if (Number.isFinite(sd1)) externalFlow1 = (externalFlow1 || 0) + sd1;
+    }
+
+    strategyDelta0 =
+      curr0 != null && base0 != null && externalFlow0 != null
+        ? curr0 - base0 - externalFlow0
+        : null;
+    strategyDelta1 =
+      curr1 != null && base1 != null && externalFlow1 != null
+        ? curr1 - base1 - externalFlow1
+        : null;
+  } catch (_) {}
+
+  summary.almSinceStart = {
+    baselineAt: baseline.baseline_snapshot_at || null,
+    hours,
+    deltaSharePp: currSharePct != null && baseSharePct != null ? currSharePct - baseSharePct : null,
+    externalFlowAmount0: externalFlow0,
+    externalFlowAmount1: externalFlow1,
+    strategyDeltaAmount0: strategyDelta0,
+    strategyDeltaAmount1: strategyDelta1,
+  };
+
+  return summary;
 }
 
 function attachAlmRolling24h(summary, row) {
@@ -1253,7 +1558,8 @@ async function getLpSummaries(userId = null) {
       const obj = JSON.parse(r.snapshot_json);
       if (obj && typeof obj === "object") {
         obj.snapshotAt = r.snapshot_at;
-        out.push(obj);
+        const withFlow = applyAlmFlowOverride(obj);
+        out.push(withFlow);
       }
     } catch (_) {}
   }

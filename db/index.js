@@ -145,6 +145,15 @@ function initSchema(db) {
     PRIMARY KEY (chain_id, symbol)
   );
 
+  CREATE TABLE IF NOT EXISTS price_cache_history (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chain_id   TEXT NOT NULL,
+    symbol     TEXT NOT NULL,
+    price_usd  REAL NOT NULL,
+    source     TEXT,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS index_streams (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     chain_id      TEXT NOT NULL,
@@ -226,6 +235,50 @@ function initSchema(db) {
     FOREIGN KEY (contract_id) REFERENCES contracts(id) ON DELETE CASCADE,
     FOREIGN KEY (stream_id) REFERENCES index_streams(id) ON DELETE CASCADE,
     UNIQUE (chain_id, tx_hash, log_index)
+  );
+
+  CREATE TABLE IF NOT EXISTS alm_share_flows (
+    event_id      INTEGER PRIMARY KEY,
+    chain_id      TEXT NOT NULL,
+    contract_id   INTEGER NOT NULL,
+    stream_id     INTEGER NOT NULL,
+    block_number  INTEGER NOT NULL CHECK (block_number >= 0),
+    tx_hash       TEXT NOT NULL,
+    log_index     INTEGER NOT NULL CHECK (log_index >= 0),
+    from_lower    TEXT NOT NULL,
+    from_eip55    TEXT NOT NULL,
+    to_lower      TEXT NOT NULL,
+    to_eip55      TEXT NOT NULL,
+    amount_raw    TEXT NOT NULL,
+    flow_kind     TEXT NOT NULL CHECK (flow_kind IN ('MINT','BURN','TRANSFER')),
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (event_id) REFERENCES chain_events(id) ON DELETE CASCADE,
+    FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE CASCADE,
+    FOREIGN KEY (contract_id) REFERENCES contracts(id) ON DELETE CASCADE,
+    FOREIGN KEY (stream_id) REFERENCES index_streams(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS alm_position_baselines (
+    user_id             INTEGER NOT NULL,
+    wallet_id           INTEGER NOT NULL,
+    contract_id         INTEGER NOT NULL,
+    token_id            TEXT NOT NULL,
+    chain_id            TEXT NOT NULL,
+    protocol            TEXT NOT NULL,
+    token0_symbol       TEXT,
+    token1_symbol       TEXT,
+    baseline_snapshot_at TEXT NOT NULL DEFAULT (datetime('now')),
+    baseline_amount0    REAL,
+    baseline_amount1    REAL,
+    baseline_shares_raw TEXT NOT NULL,
+    baseline_share_pct  REAL,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, wallet_id, contract_id, token_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (wallet_id) REFERENCES user_wallets(id) ON DELETE CASCADE,
+    FOREIGN KEY (contract_id) REFERENCES contracts(id) ON DELETE CASCADE,
+    FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE CASCADE
   );
 
   CREATE TABLE IF NOT EXISTS users (
@@ -406,6 +459,12 @@ function initSchema(db) {
   CREATE INDEX IF NOT EXISTS idx_chain_events_stream_block ON chain_events(stream_id, block_number, log_index);
   CREATE INDEX IF NOT EXISTS idx_chain_events_contract_block ON chain_events(contract_id, block_number, log_index);
   CREATE INDEX IF NOT EXISTS idx_chain_events_chain_block ON chain_events(chain_id, block_number, log_index);
+  CREATE INDEX IF NOT EXISTS idx_price_cache_history_chain_symbol_time ON price_cache_history(chain_id, symbol, fetched_at);
+  CREATE INDEX IF NOT EXISTS idx_alm_share_flows_contract_block ON alm_share_flows(contract_id, block_number, log_index);
+  CREATE INDEX IF NOT EXISTS idx_alm_share_flows_from ON alm_share_flows(contract_id, from_lower, block_number);
+  CREATE INDEX IF NOT EXISTS idx_alm_share_flows_to ON alm_share_flows(contract_id, to_lower, block_number);
+  CREATE INDEX IF NOT EXISTS idx_alm_baselines_user ON alm_position_baselines(user_id);
+  CREATE INDEX IF NOT EXISTS idx_alm_baselines_contract ON alm_position_baselines(contract_id, token_id);
 
   CREATE TRIGGER IF NOT EXISTS trg_contracts_updated_at
   AFTER UPDATE ON contracts

@@ -40,6 +40,29 @@ async function getLogsWithRetry(provider, filter, { maxAttempts = 6, baseBackoff
   return { ok: false, error: new Error("exhausted retries"), attempt: maxAttempts };
 }
 
+async function getBlockNumberWithRetry(provider, { maxAttempts = 6, baseBackoffMs = 750 } = {}) {
+  let attempt = 0;
+  let backoffMs = baseBackoffMs;
+
+  while (attempt < maxAttempts) {
+    attempt += 1;
+    try {
+      const block = await provider.getBlockNumber();
+      return { ok: true, blockNumber: Number(block), attempt };
+    } catch (err) {
+      const retryAfterMs = parseRetryAfterMs(err);
+      const shouldRetry = isRateLimitError(err) || retryAfterMs != null;
+      if (!shouldRetry || attempt >= maxAttempts) {
+        return { ok: false, error: err, attempt };
+      }
+      await sleep(retryAfterMs ?? backoffMs);
+      backoffMs = Math.min(backoffMs * 2, 10000);
+    }
+  }
+
+  return { ok: false, error: new Error('exhausted retries'), attempt: maxAttempts };
+}
+
 async function runWindowedScan({
   provider,
   address,
@@ -102,5 +125,6 @@ async function runWindowedScan({
 module.exports = {
   sleep,
   getLogsWithRetry,
+  getBlockNumberWithRetry,
   runWindowedScan,
 };
