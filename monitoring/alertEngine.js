@@ -284,10 +284,16 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
           : headline.text === "Worsening"
           ? "Red"
           : "Grey";
+      const trendArrow =
+        headline.text === "Improving"
+          ? "↗️"
+          : headline.text === "Worsening"
+          ? "↘️"
+          : "→";
 
       const embed = new EmbedBuilder()
-        .setTitle(`Redemption Alert - ${headline.text} ${headline.emoji}`)
-        .setDescription(message)
+        .setTitle(`Redemption Alert ${headline.emoji} ${trendArrow}`)
+        .setDescription(`${meta?.protocol || "UNKNOWN_PROTOCOL"}`)
         .setColor(alertColor)
         .setTimestamp();
 
@@ -372,14 +378,20 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
           : headline.text === "Worsening"
           ? "Red"
           : "Grey";
+      const trendArrow =
+        headline.text === "Improving"
+          ? "↗️"
+          : headline.text === "Worsening"
+          ? "↘️"
+          : "→";
       const bufferPct =
         typeof meta?.liquidationBufferFrac === "number" && Number.isFinite(meta?.liquidationBufferFrac)
           ? `${(meta.liquidationBufferFrac * 100).toFixed(2)}%`
           : "n/a";
 
       const embed = new EmbedBuilder()
-        .setTitle(`Liquidation Alert - ${headline.text} ${headline.emoji}`)
-        .setDescription(message)
+        .setTitle(`Liquidation Alert ${headline.emoji} ${trendArrow}`)
+        .setDescription(`${meta?.protocol || "UNKNOWN_PROTOCOL"}`)
         .setColor(alertColor)
         .setTimestamp();
 

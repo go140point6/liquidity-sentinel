@@ -256,6 +256,7 @@ module.exports = {
         if (s.owner) {
           const walletText = formatAddressLink(s.chainId, s.owner) || `**${shortenAddress(s.owner)}**`;
           valueLines.push(`Wallet: ${walletText}`);
+          if (s.walletLabel) valueLines.push(`Label: **${s.walletLabel}**`);
         }
 
         valueLines.push(`Status: **${s.status || "UNKNOWN"}**`);
