@@ -788,6 +788,13 @@ function parseSnapshotMs(raw) {
   return Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
 }
 
+function isExpectedFeeGrowthMethodMissing(err) {
+  const msg = String(err?.shortMessage || err?.message || err || "").toLowerCase();
+  return msg.includes("feegrowthglobal0x128 is not a function") ||
+    msg.includes("feegrowthglobal1x128 is not a function") ||
+    msg.includes("missing function") && (msg.includes("feegrowthglobal0x128") || msg.includes("feegrowthglobal1x128"));
+}
+
 function computePoolSharePct(liquidityRaw, poolLiquidityRaw) {
   if (!liquidityRaw || !poolLiquidityRaw) return null;
   try {
@@ -1463,9 +1470,15 @@ async function summarizeLpPosition(provider, chainId, protocol, row) {
       feeSource = "feeGrowth";
     }
   } catch (err) {
-    logger.warn(
-      `[LP][${chainId}] feeGrowth fallback FAILED tokenId=${tokenId}: ${err.shortMessage || err.message}`
-    );
+    if (isExpectedFeeGrowthMethodMissing(err)) {
+      logger.debug(
+        `[LP][${chainId}] feeGrowth fallback skipped (expected for non-v3 pool ABI) tokenId=${tokenId}: ${err?.shortMessage || err?.message || err}`
+      );
+    } else {
+      logger.warn(
+        `[LP][${chainId}] feeGrowth fallback FAILED tokenId=${tokenId}: ${err?.shortMessage || err?.message || err}`
+      );
+    }
   }
 
 
@@ -1915,9 +1928,15 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
       feeSource = "feeGrowth";
     }
   } catch (err) {
-    logger.warn(
-      `[LP][${chainId}] feeGrowth fallback FAILED tokenId=${tokenId}: ${err.shortMessage || err.message}`
-    );
+    if (isExpectedFeeGrowthMethodMissing(err)) {
+      logger.debug(
+        `[LP][${chainId}] feeGrowth fallback skipped (expected for non-v3 pool ABI) tokenId=${tokenId}: ${err?.shortMessage || err?.message || err}`
+      );
+    } else {
+      logger.warn(
+        `[LP][${chainId}] feeGrowth fallback FAILED tokenId=${tokenId}: ${err?.shortMessage || err?.message || err}`
+      );
+    }
   }
 
   let fees0 = null;
