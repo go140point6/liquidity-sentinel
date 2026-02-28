@@ -73,7 +73,7 @@ Usage:
 Behavior:
   - Dry-run by default (no writes unless --execute is set).
   - Replaces target user/config data with source:
-    users, user_wallets, position_ignores, firelight_config, firelight_subscriptions
+    users, user_wallets, position_ignores, firelight_config, firelight_subscriptions, sp_apr_config, sp_apr_subscriptions
   - Clears runtime state in target:
     loan_position_snapshots, lp_position_snapshots
   - Clears alert_state/log by default (use --keep-alerts to preserve).
@@ -86,7 +86,13 @@ function mustExist(filePath, label) {
   }
 }
 
+function tableExists(db, tableName, prefix = "main") {
+  const row = db.prepare(`SELECT 1 AS ok FROM ${prefix}.sqlite_master WHERE type = 'table' AND name = ?`).get(tableName);
+  return !!row?.ok;
+}
+
 function countTable(db, tableName, prefix = "main") {
+  if (!tableExists(db, tableName, prefix)) return 0;
   return db.prepare(`SELECT COUNT(*) AS c FROM ${prefix}.${tableName}`).get().c;
 }
 
@@ -97,6 +103,8 @@ function getCounts(db, prefix = "main") {
     position_ignores: countTable(db, "position_ignores", prefix),
     firelight_config: countTable(db, "firelight_config", prefix),
     firelight_subscriptions: countTable(db, "firelight_subscriptions", prefix),
+    sp_apr_config: countTable(db, "sp_apr_config", prefix),
+    sp_apr_subscriptions: countTable(db, "sp_apr_subscriptions", prefix),
     loan_position_snapshots: countTable(db, "loan_position_snapshots", prefix),
     lp_position_snapshots: countTable(db, "lp_position_snapshots", prefix),
     alert_state: countTable(db, "alert_state", prefix),
@@ -152,6 +160,8 @@ function main() {
       db.exec("DELETE FROM user_wallets");
       db.exec("DELETE FROM firelight_subscriptions");
       db.exec("DELETE FROM firelight_config");
+      db.exec("DELETE FROM sp_apr_subscriptions");
+      db.exec("DELETE FROM sp_apr_config");
       db.exec("DELETE FROM users");
 
       db.exec(`
@@ -217,6 +227,28 @@ function main() {
         JOIN src.users u_src ON u_src.id = fs.user_id
         JOIN users u_new ON u_new.discord_id = u_src.discord_id
       `);
+
+      if (tableExists(db, "sp_apr_config", "src")) {
+        db.exec(`
+          INSERT INTO sp_apr_config (
+            id, channel_id, message_id, last_top_pool_key, last_checked_at, created_at, updated_at
+          )
+          SELECT
+            id, channel_id, message_id, last_top_pool_key, last_checked_at, created_at, updated_at
+          FROM src.sp_apr_config
+        `);
+      }
+
+      if (tableExists(db, "sp_apr_subscriptions", "src")) {
+        db.exec(`
+          INSERT INTO sp_apr_subscriptions (user_id, created_at)
+          SELECT
+            u_new.id, ss.created_at
+          FROM src.sp_apr_subscriptions ss
+          JOIN src.users u_src ON u_src.id = ss.user_id
+          JOIN users u_new ON u_new.discord_id = u_src.discord_id
+        `);
+      }
 
     });
 

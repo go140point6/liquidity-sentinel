@@ -1,7 +1,7 @@
-// events/onReaction.js
 const { getDb, getOrCreateUserId } = require("../db");
 const { sendDmOrChannelNotice } = require("../utils/discord/dm");
 const logger = require("../utils/logger");
+const { SP_APR_REACTION_EMOJI } = require("../jobs/stabilityAprJob");
 
 const FIRELIGHT_EMOJI = "🔥";
 
@@ -34,17 +34,27 @@ function getFirelightConfig(db) {
     .get();
 }
 
-async function handleFirelightReaction({ reaction, user, isAdd }) {
+function getSpAprConfig(db) {
+  return db
+    .prepare(
+      `
+      SELECT channel_id, message_id
+      FROM sp_apr_config
+      WHERE id = 1
+      LIMIT 1
+    `
+    )
+    .get();
+}
+
+async function handleSubscriptionReaction({ reaction, user, isAdd, emoji, cfg, table, subscribeText, unsubscribeText, tag }) {
   if (!user || user.bot) return;
-  if (!reaction || reaction.emoji?.name !== FIRELIGHT_EMOJI) return;
-
-  const db = getDb();
-  const cfg = getFirelightConfig(db);
+  if (!reaction || reaction.emoji?.name !== emoji) return;
   if (!cfg?.message_id || !cfg?.channel_id) return;
-
   if (reaction.message?.id !== cfg.message_id) return;
   if (reaction.message?.channel?.id !== cfg.channel_id) return;
 
+  const db = getDb();
   const userId = getOrCreateUserId(db, {
     discordId: user.id,
     discordName: user.username,
@@ -59,14 +69,11 @@ async function handleFirelightReaction({ reaction, user, isAdd }) {
   const acceptsDm = acceptsRow?.accepts_dm || 0;
 
   const subExists = db
-    .prepare(`SELECT 1 FROM firelight_subscriptions WHERE user_id = ?`)
+    .prepare(`SELECT 1 FROM ${table} WHERE user_id = ?`)
     .get(userId);
 
   if (isAdd) {
     if (subExists) return;
-
-    const dmContent =
-      "Firelight subscription: You will be notified by DM when vault capacity changes.";
 
     const res = await sendDmOrChannelNotice({
       user,
@@ -75,7 +82,7 @@ async function handleFirelightReaction({ reaction, user, isAdd }) {
       acceptsDm,
       setUserDmStmt,
       channel: reaction.message.channel,
-      dmContent,
+      dmContent: subscribeText,
     });
 
     if (!res?.canDm) {
@@ -85,14 +92,9 @@ async function handleFirelightReaction({ reaction, user, isAdd }) {
       return;
     }
 
-    db.prepare(
-      `INSERT INTO firelight_subscriptions (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING`
-    ).run(userId);
+    db.prepare(`INSERT INTO ${table} (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING`).run(userId);
   } else {
-    db.prepare(`DELETE FROM firelight_subscriptions WHERE user_id = ?`).run(userId);
-
-    const dmContent =
-      "Firelight subscription: You have been unsubscribed. No further DMs will be sent.";
+    db.prepare(`DELETE FROM ${table} WHERE user_id = ?`).run(userId);
 
     await sendDmOrChannelNotice({
       user,
@@ -101,28 +103,78 @@ async function handleFirelightReaction({ reaction, user, isAdd }) {
       acceptsDm,
       setUserDmStmt,
       channel: reaction.message.channel,
-      dmContent,
+      dmContent: unsubscribeText,
     });
   }
+
+  logger.debug(`[${tag}] reaction subscription ${isAdd ? "add" : "remove"} user=${user.id}`);
 }
 
 async function onReactionAdd(reaction, user) {
   const r = await fetchIfPartial(reaction);
   if (!r) return;
+  const db = getDb();
+
   try {
-    await handleFirelightReaction({ reaction: r, user, isAdd: true });
+    await handleSubscriptionReaction({
+      reaction: r,
+      user,
+      isAdd: true,
+      emoji: FIRELIGHT_EMOJI,
+      cfg: getFirelightConfig(db),
+      table: "firelight_subscriptions",
+      subscribeText: "Firelight subscription: You will be notified by DM when vault capacity changes.",
+      unsubscribeText: "Firelight subscription: You have been unsubscribed. No further DMs will be sent.",
+      tag: "firelight",
+    });
+
+    await handleSubscriptionReaction({
+      reaction: r,
+      user,
+      isAdd: true,
+      emoji: SP_APR_REACTION_EMOJI,
+      cfg: getSpAprConfig(db),
+      table: "sp_apr_subscriptions",
+      subscribeText: "Stability APR subscription: You will be notified by DM when the top 24h APR Stability Pool changes.",
+      unsubscribeText: "Stability APR subscription: You have been unsubscribed. No further DMs will be sent.",
+      tag: "sp-apr",
+    });
   } catch (err) {
-    logger.error("[firelight] reaction add failed:", err?.message || err);
+    logger.error("[reaction] add failed:", err?.message || err);
   }
 }
 
 async function onReactionRemove(reaction, user) {
   const r = await fetchIfPartial(reaction);
   if (!r) return;
+  const db = getDb();
+
   try {
-    await handleFirelightReaction({ reaction: r, user, isAdd: false });
+    await handleSubscriptionReaction({
+      reaction: r,
+      user,
+      isAdd: false,
+      emoji: FIRELIGHT_EMOJI,
+      cfg: getFirelightConfig(db),
+      table: "firelight_subscriptions",
+      subscribeText: "Firelight subscription: You will be notified by DM when vault capacity changes.",
+      unsubscribeText: "Firelight subscription: You have been unsubscribed. No further DMs will be sent.",
+      tag: "firelight",
+    });
+
+    await handleSubscriptionReaction({
+      reaction: r,
+      user,
+      isAdd: false,
+      emoji: SP_APR_REACTION_EMOJI,
+      cfg: getSpAprConfig(db),
+      table: "sp_apr_subscriptions",
+      subscribeText: "Stability APR subscription: You will be notified by DM when the top 24h APR Stability Pool changes.",
+      unsubscribeText: "Stability APR subscription: You have been unsubscribed. No further DMs will be sent.",
+      tag: "sp-apr",
+    });
   } catch (err) {
-    logger.error("[firelight] reaction remove failed:", err?.message || err);
+    logger.error("[reaction] remove failed:", err?.message || err);
   }
 }
 

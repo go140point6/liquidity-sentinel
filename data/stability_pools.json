@@ -1,0 +1,18 @@
+{
+  "chains": {
+    "FLR": {
+      "pools": [
+        {
+          "key": "fxrp_sp",
+          "label": "FXRP Stability Pool",
+          "address": "0x2c817F7159c08d94f09764086330c96Bb3265A2f"
+        },
+        {
+          "key": "wflr_sp",
+          "label": "WFLR Stability Pool",
+          "address": "0x0Dd6daab4cB9A0ba6707Cf59DBfbc28cc33CA24A"
+        }
+      ]
+    }
+  }
+}
