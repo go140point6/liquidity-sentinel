@@ -13,6 +13,9 @@ function validateEnv() {
     "FIRELIGHT_POLL_MIN",
     "FIRELIGHT_VAULT_ADDRESS",
     "FIRELIGHT_OPEN_BUFFER",
+    "SP_APR_CHANNEL_ID",
+    "SP_APR_POLL_MIN",
+    "SP_APR_REACTION_EMOJI",
   ];
 
   const missing = requiredVars.filter(

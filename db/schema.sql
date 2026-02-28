@@ -8,6 +8,9 @@ DROP TABLE IF EXISTS alert_state;
 DROP TABLE IF EXISTS position_ignores;
 DROP TABLE IF EXISTS firelight_subscriptions;
 DROP TABLE IF EXISTS firelight_config;
+DROP TABLE IF EXISTS sp_apr_subscriptions;
+DROP TABLE IF EXISTS sp_apr_config;
+DROP TABLE IF EXISTS sp_apr_snapshots;
 DROP TABLE IF EXISTS redemption_rate_snapshots;
 
 DROP TABLE IF EXISTS global_params;
@@ -450,6 +453,41 @@ CREATE TABLE firelight_subscriptions (
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+
+CREATE TABLE sp_apr_config (
+  id                INTEGER PRIMARY KEY CHECK (id = 1),
+  channel_id        TEXT NOT NULL,
+  message_id        TEXT NOT NULL,
+  last_top_pool_key TEXT,
+  last_checked_at   TEXT,
+  created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE sp_apr_subscriptions (
+  user_id     INTEGER PRIMARY KEY,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE sp_apr_snapshots (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  chain_id            TEXT NOT NULL,
+  pool_key            TEXT NOT NULL,
+  pool_address        TEXT NOT NULL,
+  pool_label          TEXT NOT NULL,
+  coll_symbol         TEXT,
+  total_bold_deposits TEXT,
+  current_scale       TEXT,
+  p_value             TEXT,
+  scale_b_value       TEXT,
+  index_value         REAL,
+  created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_sp_apr_snapshots_chain_pool_time
+  ON sp_apr_snapshots(chain_id, pool_key, created_at);
 
 -- =========================================================
 -- REDEMPTION RATE SNAPSHOTS (per contract)

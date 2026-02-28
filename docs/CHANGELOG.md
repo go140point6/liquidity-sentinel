@@ -4,6 +4,15 @@ All notable, user-facing changes are documented here.
 
 ---
 
+## [2026-02-27]
+
+### Added
+- Stability Pool APR board channel (24h realized, annualized) with a single edited message and hourly refresh support.
+- Reaction-based subscriptions for Stability Pool APR leader-flip DMs (alerts when a different pool becomes highest APR).
+
+### Changed
+- Added admin commands `!!postspapr` and `!!editspapr` for seeding/updating the APR board message.
+
 ## [2026-02-26]
 
 ### Changed

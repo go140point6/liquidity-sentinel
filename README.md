@@ -70,6 +70,7 @@ Delivery time is user-configurable from `/my-wallets` (hour + timezone).
 - Multi-chain RPC support with strict environment validation.
 - Lightweight custom logger for consistent, controllable output.
 - Optional Firelight vault-capacity signal channel with reaction-based DM subscription.
+- Optional Stability Pool APR board channel (24h realized/annualized) with leader-flip DM subscriptions.
 
 ---
 
