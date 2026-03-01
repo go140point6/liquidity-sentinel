@@ -1,16 +1,8 @@
 const cron = require("node-cron");
-const { ethers } = require("ethers");
 
-const stabilityPoolAbi = require("../abi/stabilityPool.json");
-const erc20MetaAbi = require("../abi/erc20Metadata.json");
-const { getProviderForChain } = require("../utils/ethers/providers");
 const { getDb } = require("../db");
 const { getStabilityPoolsForChain } = require("../utils/stabilityPoolConfig");
 const logger = require("../utils/logger");
-
-const CHAINS_CONFIG = {
-  FLR: { rpcEnvKey: "FLR_MAINNET" },
-};
 
 function requireEnv(name) {
   const v = process.env[name];
@@ -28,10 +20,35 @@ function requireNumberEnv(name) {
 const SP_APR_REACTION_EMOJI = requireEnv("SP_APR_REACTION_EMOJI");
 const SP_APR_CHANNEL_ID = requireEnv("SP_APR_CHANNEL_ID");
 const SP_APR_POLL_MIN = requireNumberEnv("SP_APR_POLL_MIN");
+const GLOBAL_IR_URL = requireEnv("GLOBAL_IR_URL");
 
 function fmtPct(n) {
   if (!Number.isFinite(n)) return "n/a";
   return `${n.toFixed(2)}%`;
+}
+
+function toNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function inferBranchKey(poolCfg) {
+  const t = `${poolCfg.key || ""} ${poolCfg.label || ""}`.toUpperCase();
+  if (t.includes("FXRP")) return "FXRP";
+  if (t.includes("WFLR")) return "WFLR";
+  return null;
+}
+
+async function fetchJson(url, timeoutMs = 12000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 function getConfig(db) {
@@ -93,110 +110,68 @@ function buildBoardMessage(state) {
   return lines.join("\n");
 }
 
-async function readPoolRow(provider, poolCfg, db) {
-  const sp = new ethers.Contract(poolCfg.address, stabilityPoolAbi, provider);
-
-  const [currentScaleRaw, pRaw, totalBoldDeposits, collToken] = await Promise.all([
-    sp.currentScale(),
-    sp.P(),
-    sp.getTotalBoldDeposits(),
-    sp.collToken(),
-  ]);
-
-  const currentScale = Number(currentScaleRaw);
-  const bRaw = await sp.scaleToB(currentScaleRaw);
-
-  // index ~ cumulative BOLD gain per 1 BOLD deposited (approx, 36-dec math)
-  let indexValue = null;
-  if (pRaw > 0n) {
-    const ray = (BigInt(bRaw) * 10n ** 18n) / BigInt(pRaw);
-    indexValue = Number(ethers.formatUnits(ray, 18));
+function parseBranchApr(branchObj) {
+  if (!branchObj || typeof branchObj !== "object") {
+    return { totalPct: null, feePct: null, apsPct: null, rflrPct: null };
   }
 
-  const token = new ethers.Contract(collToken, erc20MetaAbi, provider);
-  let collSymbol = poolCfg.label;
-  try {
-    collSymbol = await token.symbol();
-  } catch (_) {}
+  const total = toNumber(branchObj.sp_apy_1d_total);
+  const fee = toNumber(branchObj.sp_apy_avg_1d);
+  const aps = toNumber(branchObj?.incentives?.aps?.apy_1d);
+  const rflr = toNumber(branchObj?.incentives?.rflr?.apy_1d);
 
-  db.prepare(`
-    INSERT INTO sp_apr_snapshots (
-      chain_id, pool_key, pool_address, pool_label, coll_symbol,
-      total_bold_deposits, current_scale, p_value, scale_b_value, index_value
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    poolCfg.chainId,
-    poolCfg.key,
-    poolCfg.address,
-    poolCfg.label,
-    collSymbol,
-    String(totalBoldDeposits),
-    String(currentScale),
-    String(pRaw),
-    String(bRaw),
-    indexValue
-  );
-
-  const prev = db.prepare(`
-    SELECT index_value, created_at
-    FROM sp_apr_snapshots
-    WHERE chain_id = ? AND pool_key = ? AND created_at <= datetime('now', '-24 hours')
-      AND index_value IS NOT NULL
-    ORDER BY created_at DESC
-    LIMIT 1
-  `).get(poolCfg.chainId, poolCfg.key);
-
-  let apr24hPct = null;
-  if (prev && Number.isFinite(Number(prev.index_value))) {
-    const prevIndex = Number(prev.index_value);
-    const prevTs = Date.parse(String(prev.created_at).replace(" ", "T") + "Z");
-    const nowTs = Date.now();
-    const elapsedHours = (nowTs - prevTs) / 3600000;
-    if (elapsedHours > 0 && Number.isFinite(indexValue)) {
-      const delta = indexValue - prevIndex;
-      apr24hPct = delta * (24 / elapsedHours) * 365 * 100;
-    }
-  }
+  const summed =
+    (fee == null ? 0 : fee) +
+    (aps == null ? 0 : aps) +
+    (rflr == null ? 0 : rflr);
 
   return {
-    chainId: poolCfg.chainId,
-    key: poolCfg.key,
-    label: poolCfg.label,
-    poolAddress: poolCfg.address,
-    collSymbol,
-    totalBoldDeposits: String(totalBoldDeposits),
-    indexValue,
-    apr24hPct,
+    totalPct: total != null ? total * 100 : (fee != null || aps != null || rflr != null ? summed * 100 : null),
+    feePct: fee == null ? null : fee * 100,
+    apsPct: aps == null ? null : aps * 100,
+    rflrPct: rflr == null ? null : rflr * 100,
   };
 }
 
-async function readState(db) {
+async function readState(_db) {
   const pools = getStabilityPoolsForChain("FLR");
   if (!pools.length) {
     return { rows: [], top: null };
   }
 
-  const provider = getProviderForChain("FLR", CHAINS_CONFIG);
-  const rows = [];
-
-  for (const poolCfg of pools) {
-    try {
-      const row = await readPoolRow(provider, poolCfg, db);
-      rows.push(row);
-    } catch (err) {
-      logger.warn(`[sp-apr] failed reading pool ${poolCfg.key} ${poolCfg.address}: ${err?.message || err}`);
-      rows.push({
+  let json;
+  try {
+    json = await fetchJson(GLOBAL_IR_URL);
+  } catch (err) {
+    logger.warn(`[sp-apr] failed to fetch json: ${err?.message || err}`);
+    return {
+      rows: pools.map((poolCfg) => ({
         chainId: poolCfg.chainId,
         key: poolCfg.key,
         label: poolCfg.label,
-        poolAddress: poolCfg.address,
-        collSymbol: null,
-        totalBoldDeposits: null,
-        indexValue: null,
+        collSymbol: inferBranchKey(poolCfg) || null,
         apr24hPct: null,
-      });
-    }
+      })),
+      top: null,
+    };
   }
+
+  const rows = pools.map((poolCfg) => {
+    const branchKey = inferBranchKey(poolCfg);
+    const branchObj = branchKey ? json?.branch?.[branchKey] : null;
+    const apr = parseBranchApr(branchObj);
+
+    return {
+      chainId: poolCfg.chainId,
+      key: poolCfg.key,
+      label: poolCfg.label,
+      collSymbol: branchKey,
+      apr24hPct: apr.totalPct,
+      fee24hPct: apr.feePct,
+      aps24hPct: apr.apsPct,
+      rflr24hPct: apr.rflrPct,
+    };
+  });
 
   const finite = rows.filter((r) => Number.isFinite(r.apr24hPct));
   let top = null;
