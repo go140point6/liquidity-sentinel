@@ -16,6 +16,11 @@ function validateEnv() {
     "SP_APR_CHANNEL_ID",
     "SP_APR_POLL_MIN",
     "SP_APR_REACTION_EMOJI",
+    "NODE_CRON_WARN_THROTTLE_MS",
+    "EVENT_LOOP_LAG_CHECK_MS",
+    "EVENT_LOOP_LAG_WARN_MS",
+    "EVENT_LOOP_LAG_EXIT_MS",
+    "EVENT_LOOP_LAG_STRIKES",
   ];
 
   const missing = requiredVars.filter(

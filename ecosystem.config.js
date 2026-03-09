@@ -6,7 +6,7 @@ module.exports = {
       interpreter: "node",
       //node_args: "--trace-deprecation",
       autorestart: false,
-      cron_restart: "*/10 * * * *",
+      cron_restart: "*/7 * * * *",
       time: true,
       env: {
         NODE_ENV: "production",

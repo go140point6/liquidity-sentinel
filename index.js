@@ -13,6 +13,7 @@ const { onMessage } = require("./events/onMessage");
 const { onReactionAdd, onReactionRemove } = require("./events/onReaction");
 const { validateEnv } = require("./utils/discord/validateEnv");
 const log = require("./utils/logger");
+const { installNodeCronWarnThrottle, startEventLoopWatchdog } = require("./utils/runtimeGuards");
 
 function fatal(message, error) {
   log.error(message);
@@ -30,6 +31,9 @@ process.on("uncaughtException", (err) => {
 
 (async () => {
   validateEnv();
+
+  installNodeCronWarnThrottle();
+  startEventLoopWatchdog();
 
   const client = new Client({
     intents: GatewayIntentBits,
