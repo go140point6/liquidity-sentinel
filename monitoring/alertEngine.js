@@ -36,6 +36,19 @@ function formatTierList(currentTier) {
     .join("\n");
 }
 
+function tierColor(tier) {
+  const tierU = (tier || "UNKNOWN").toString().toUpperCase();
+  return (
+    {
+      CRITICAL: "Red",
+      HIGH: "Orange",
+      MEDIUM: "Yellow",
+      LOW: "Green",
+      UNKNOWN: "Grey",
+    }[tierU] || "Grey"
+  );
+}
+
 function renderPositionBar(pct) {
   if (pct == null || !Number.isFinite(pct)) return "0% |---------------------| 100%";
   const barLen = 21;
@@ -278,12 +291,7 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
           : trend.label === "Worsening"
           ? { text: "Worsening", emoji: "🔴" }
           : { text: "Updated", emoji: "⚪" };
-      const alertColor =
-        headline.text === "Improving"
-          ? "Green"
-          : headline.text === "Worsening"
-          ? "Red"
-          : "Grey";
+      const alertColor = tierColor(newTier);
       const trendArrow =
         headline.text === "Improving"
           ? "↗️"
@@ -372,12 +380,7 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
           : trend.label === "Worsening"
           ? { text: "Worsening", emoji: "🔴" }
           : { text: "Updated", emoji: "⚪" };
-      const alertColor =
-        headline.text === "Improving"
-          ? "Green"
-          : headline.text === "Worsening"
-          ? "Red"
-          : "Grey";
+      const alertColor = tierColor(newTier);
       const trendArrow =
         headline.text === "Improving"
           ? "↗️"
@@ -535,12 +538,7 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
       if (statusChanged) headline = labelFromStatus();
       else if (tierChanged) headline = labelFromTrend();
 
-      const alertColor =
-        headline.text === "Improving"
-          ? "Green"
-          : headline.text === "Worsening"
-          ? "Red"
-          : "Grey";
+      const alertColor = tierColor(newTier);
 
       const statusShort =
         currentStatus === "IN_RANGE"
@@ -579,7 +577,7 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
             ? { text: "Out of Range", emoji: "🔴", color: "Red" }
             : { text: "Updated", emoji: "⚪", color: "Grey" };
         embed.setTitle(`LP Range Alert - ${statusText.text} ${statusText.emoji}`);
-        embed.setColor(statusText.color);
+        embed.setColor(tierColor(newTier));
       }
       const fields = [
         {
