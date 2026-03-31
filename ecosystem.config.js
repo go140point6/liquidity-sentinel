@@ -6,7 +6,7 @@ module.exports = {
       interpreter: "node",
       //node_args: "--trace-deprecation",
       autorestart: false,
-      cron_restart: "*/7 * * * *",
+      cron_restart: "0,8,16,24,32,40,48,56 * * * *",
       time: true,
       env: {
         NODE_ENV: "production",
@@ -17,6 +17,7 @@ module.exports = {
       script: "jobs/scanLoanLpPositions.js",
       interpreter: "node",
       autorestart: false,
+      cron_restart: "2,10,18,26,34,42,50,58 * * * *",
       time: true,
       env: {
         NODE_ENV: "production",

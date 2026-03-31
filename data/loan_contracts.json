@@ -18,6 +18,22 @@
           "envStartKey": "ENOSYS_WFLR_LOAN_START_BLOCK",
           "csvFile": "enosys_wflr_loans_positions.csv",
           "default_start_block": 51999000
+        },
+        {
+          "key": "enosys_stxrp",
+          "protocol": "ENOSYS_LOAN_STXRP",
+          "address": "0x883803fdbf0408747a59E69C972A1d849a484033",
+          "envStartKey": "ENOSYS_STXRP_LOAN_START_BLOCK",
+          "csvFile": "enosys_stxrp_loans_positions.csv",
+          "default_start_block": 57855000
+        },
+        {
+          "key": "enosys_sflr",
+          "protocol": "ENOSYS_LOAN_SFLR",
+          "address": "0xB12Dde517Bdf28DD5BE8A6916123D1aA5C6e83a1",
+          "envStartKey": "ENOSYS_SFLR_LOAN_START_BLOCK",
+          "csvFile": "enosys_sflr_loans_positions.csv",
+          "default_start_block": 57855000
         }
       ]
     }
