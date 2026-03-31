@@ -782,9 +782,6 @@ async function refreshRedemptionRateSnapshots(
   const loanContracts = selectContracts(db, { chainId: null, kind: "LOAN_NFT", limit: 500 });
   if (!loanContracts.length) return;
 
-  const hasLoanSnapshot = db.prepare(
-    `SELECT 1 FROM loan_position_snapshots WHERE contract_id = ? LIMIT 1`
-  );
   const hasPendingLoanSnapshot = db.prepare(`
     SELECT 1
     FROM nft_tokens t
@@ -825,13 +822,6 @@ async function refreshRedemptionRateSnapshots(
   `);
 
   for (const c of loanContracts) {
-    if (REDEMP_SNAPSHOT_REQUIRE_LOANS && !hasLoanSnapshot.get(c.contract_id)) {
-      logger.debug(
-        `[scanLoanLpPositions] redemption-rate skip ${c.protocol}: no loan snapshots`
-      );
-      continue;
-    }
-
     const pendingLoan = hasPendingLoanSnapshot.get(c.contract_id);
     if (pendingLoan) {
       logger.debug(

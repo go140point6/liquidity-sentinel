@@ -258,6 +258,8 @@ async function fetchGlobalIrPctMap() {
 
 function inferBranchKeyFromProtocol(protocol) {
   const p = (protocol || "").toUpperCase();
+  if (p.includes("STXRP")) return "STXRP";
+  if (p.includes("SFLR")) return "SFLR";
   if (p.includes("FXRP")) return "FXRP";
   if (p.includes("WFLR")) return "WFLR";
   return null;
