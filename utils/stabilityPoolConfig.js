@@ -43,6 +43,8 @@ function getStabilityPoolsForChain(chainId) {
         chainId: key,
         key: String(p.key || "").trim(),
         label: String(p.label || p.key || "").trim(),
+        branchKey: String(p.branchKey || "").trim().toUpperCase() || null,
+        collSymbol: String(p.collSymbol || "").trim().toUpperCase() || null,
         address: addr,
       };
     })
