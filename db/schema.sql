@@ -472,22 +472,48 @@ CREATE TABLE sp_apr_subscriptions (
 );
 
 CREATE TABLE sp_apr_snapshots (
-  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-  chain_id            TEXT NOT NULL,
-  pool_key            TEXT NOT NULL,
-  pool_address        TEXT NOT NULL,
-  pool_label          TEXT NOT NULL,
-  coll_symbol         TEXT,
-  total_bold_deposits TEXT,
-  current_scale       TEXT,
-  p_value             TEXT,
-  scale_b_value       TEXT,
-  index_value         REAL,
-  created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  chain_id              TEXT NOT NULL,
+  pool_key              TEXT NOT NULL,
+  pool_address          TEXT NOT NULL,
+  pool_label            TEXT NOT NULL,
+  coll_symbol           TEXT,
+  total_bold_deposits   TEXT,
+  total_bold_deposits_num REAL,
+  current_scale         TEXT,
+  p_value               TEXT,
+  scale_b_value         TEXT,
+  index_value           REAL,
+  apr_24h_pct           REAL,
+  fee_24h_pct           REAL,
+  aps_24h_pct           REAL,
+  rflr_24h_pct          REAL,
+  created_at            TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX idx_sp_apr_snapshots_chain_pool_time
   ON sp_apr_snapshots(chain_id, pool_key, created_at);
+
+CREATE TABLE sp_position_snapshots (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL,
+  wallet_id     INTEGER NOT NULL,
+  chain_id      TEXT NOT NULL,
+  pool_key      TEXT NOT NULL,
+  pool_address  TEXT NOT NULL,
+  pool_label    TEXT NOT NULL,
+  snapshot_json TEXT NOT NULL,
+  snapshot_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (wallet_id) REFERENCES user_wallets(id) ON DELETE CASCADE,
+  FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE RESTRICT,
+  UNIQUE (user_id, wallet_id, chain_id, pool_key)
+);
+
+CREATE INDEX idx_sp_position_snapshots_user_time
+  ON sp_position_snapshots(user_id, snapshot_at);
 
 -- =========================================================
 -- REDEMPTION RATE SNAPSHOTS (per contract)

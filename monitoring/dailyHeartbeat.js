@@ -4,6 +4,7 @@ const { getLoanSummaries, refreshLoanSnapshots } = require("./loanMonitor");
 const { getLpSummaries, refreshLpSnapshots } = require("./lpMonitor");
 const { createDecimalFormatter } = require("../utils/intlNumberFormats");
 const { getDb } = require("../db");
+const { getSpPositionSummaries } = require("../utils/stabilityPoolPositions");
 const { acquireLock, releaseLock } = require("../utils/lock");
 const logger = require("../utils/logger");
 const { shortenTroveId } = require("../utils/ethers/shortenTroveId");
@@ -27,9 +28,10 @@ function requireNumberEnv(name) {
 
 const LOAN_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LOAN_SNAPSHOT_STALE_WARN_MIN");
 const LP_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LP_SNAPSHOT_STALE_WARN_MIN");
+const SP_POSITION_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SP_POSITION_SNAPSHOT_STALE_WARN_MIN");
 const SNAPSHOT_STALE_WARN_MS = Math.max(
   0,
-  Math.floor(Math.max(LOAN_SNAPSHOT_STALE_WARN_MIN, LP_SNAPSHOT_STALE_WARN_MIN) * 60 * 1000)
+  Math.floor(Math.max(LOAN_SNAPSHOT_STALE_WARN_MIN, LP_SNAPSHOT_STALE_WARN_MIN, SP_POSITION_SNAPSHOT_STALE_WARN_MIN) * 60 * 1000)
 );
 const DEFAULT_HEARTBEAT_TZ = process.env.HEARTBEAT_TZ || "America/Los_Angeles";
 const SNAPSHOT_LOCK_NAME = "snapshot-refresh";
@@ -525,6 +527,21 @@ function formatAlmLpField(s, priceCache) {
   return { name: title, value: parts.join("\n") };
 }
 
+function formatSpField(s) {
+  const title = `${s.poolLabel || s.poolKey || "Unknown"} (${s.chainId || "?"})`;
+  const lines = [];
+  if (s.walletAddress) {
+    const walletText = formatAddressLink(s.chainId, s.walletAddress) || shortenAddress(s.walletAddress);
+    lines.push(`Wallet: ${walletText}`);
+    if (s.walletLabel) lines.push(`Label: **${s.walletLabel}**`);
+  }
+  lines.push(`Current deposit: **${fmtNum2(Number(s.compoundedDeposit))} CDP**`);
+  lines.push(`Pending CDP yield: **${fmtNum2(Number(s.yieldGain))} CDP**`);
+  lines.push(`Claimable collateral: **${fmtNum5(Number(s.claimableCollateral))} ${s.collSymbol || "COLL"}**`);
+  lines.push(`Pool share: **${fmtPct2(Number(s.poolSharePct))}**`);
+  return { name: title, value: lines.join("\n") };
+}
+
 function worstLoanTier(loans) {
   const order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"];
   let worst = "UNKNOWN";
@@ -568,7 +585,7 @@ function colorForLpStatus(status) {
   );
 }
 
-function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, priceCache }) {
+function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, spSummaries, client, priceCache }) {
   const embeds = [];
   const activeLoanSummaries = (loanSummaries || []).filter(
     (s) => String(s.status || "").toUpperCase() !== "CLOSED"
@@ -579,13 +596,16 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
   });
   const activeRegularLpSummaries = activeLpSummaries.filter((s) => !isAlmPosition(s));
   const activeAlmLpSummaries = activeLpSummaries.filter((s) => isAlmPosition(s));
+  const activeSpSummaries = (spSummaries || []).filter((s) => Number(s.compoundedDeposit) > 0 || Number(s.yieldGain) > 0 || Number(s.claimableCollateral) > 0);
   const loanCount = activeLoanSummaries.length;
   const lpCount = activeRegularLpSummaries.length;
   const almCount = activeAlmLpSummaries.length;
+  const spCount = activeSpSummaries.length;
 
   const snapshotTimes = []
     .concat(activeLoanSummaries)
     .concat(activeLpSummaries)
+    .concat(activeSpSummaries)
     .map((s) => parseSnapshotTs(s?.snapshotAt))
     .filter((v) => v != null);
   const latestSnapshot = snapshotTimes.length ? Math.max(...snapshotTimes) : null;
@@ -593,7 +613,7 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
     ? formatSnapshotLine(new Date(latestSnapshot * 1000).toISOString())
     : null;
 
-  const headerLines = [`Loans: **${loanCount}** | LPs: **${lpCount}** | ALMs: **${almCount}**`];
+  const headerLines = [`Loans: **${loanCount}** | LPs: **${lpCount}** | ALMs: **${almCount}** | SPs: **${spCount}**`];
   if (snapshotLine) headerLines.push("", snapshotLine);
 
   const header = new EmbedBuilder()
@@ -753,6 +773,32 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
     });
   }
 
+  const spFields = activeSpSummaries
+    .slice()
+    .sort((a, b) => {
+      const av = Number(a.compoundedDeposit) || 0;
+      const bv = Number(b.compoundedDeposit) || 0;
+      if (bv !== av) return bv - av;
+      return String(a.poolLabel || "").localeCompare(String(b.poolLabel || ""));
+    })
+    .map((s) => formatSpField(s));
+
+  if (spFields.length) {
+    const baseSize = "Stability Pools".length + 200;
+    const MAX_EMBED_CHARS = 5200;
+    const chunks = chunkFieldsBySize(spFields, baseSize, MAX_EMBED_CHARS);
+    chunks.forEach((fields, idx) => {
+      const e = new EmbedBuilder()
+        .setTitle(idx === 0 ? "Stability Pools" : "Stability Pools (cont.)")
+        .setColor("DarkBlue")
+        .addFields(fields);
+      if (idx === 0) {
+        e.setDescription("_Current deposit is compounded CDP. Claimable collateral includes stashed + newly accrued collateral._");
+      }
+      embeds.push(e);
+    });
+  }
+
   if (embeds.length) {
     embeds[embeds.length - 1].setTimestamp();
   }
@@ -879,6 +925,7 @@ async function sendDailyHeartbeat(client) {
   }
 
   const nowIso = new Date().toISOString();
+  const db = getDb();
 
   const userCache = new Map(); // discordId -> Discord.User
 
@@ -889,12 +936,14 @@ async function sendDailyHeartbeat(client) {
 
     const userLoans = (allLoanSummaries || []).filter((s) => String(s.userId) === userIdKey);
     const userLps = (allLpSummaries || []).filter((s) => String(s.userId) === userIdKey);
+    const userSps = getSpPositionSummaries(db, Number(r.userId));
 
-  const priceCache = loadPriceCache(getDb());
-  const embeds = buildHeartbeatEmbeds({
+    const priceCache = loadPriceCache(db);
+    const embeds = buildHeartbeatEmbeds({
       nowIso,
       loanSummaries: userLoans,
       lpSummaries: userLps,
+      spSummaries: userSps,
       client,
       priceCache,
     });

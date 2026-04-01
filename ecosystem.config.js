@@ -44,6 +44,28 @@ module.exports = {
       },
     },
     {
+      name: "sp-snapshot-hourly",
+      script: "jobs/collectStabilityPoolSnapshots.js",
+      interpreter: "node",
+      autorestart: false,
+      cron_restart: "6 * * * *",
+      time: true,
+      env: {
+        NODE_ENV: "production",
+      },
+    },
+    {
+      name: "sp-position-scan",
+      script: "jobs/scanStabilityPoolPositions.js",
+      interpreter: "node",
+      autorestart: false,
+      cron_restart: "5,15,25,35,45,55 * * * *",
+      time: true,
+      env: {
+        NODE_ENV: "production",
+      },
+    },
+    {
       name: "index-daily-integrity",
       script: "jobs/indexDailyIntegrity.js",
       interpreter: "node",

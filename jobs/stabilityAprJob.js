@@ -1,8 +1,13 @@
 const cron = require("node-cron");
 
 const { getDb } = require("../db");
-const { getStabilityPoolsForChain } = require("../utils/stabilityPoolConfig");
 const logger = require("../utils/logger");
+const { loadPriceCache } = require("../utils/priceCache");
+const {
+  getLatestStabilityPoolSnapshots,
+  getPoolShortLabel,
+  recommendSinglePoolAllocation,
+} = require("../utils/stabilityPoolSignals");
 
 function requireEnv(name) {
   const v = process.env[name];
@@ -20,35 +25,26 @@ function requireNumberEnv(name) {
 const SP_APR_REACTION_EMOJI = requireEnv("SP_APR_REACTION_EMOJI");
 const SP_APR_CHANNEL_ID = requireEnv("SP_APR_CHANNEL_ID");
 const SP_APR_POLL_MIN = requireNumberEnv("SP_APR_POLL_MIN");
-const GLOBAL_IR_URL = requireEnv("GLOBAL_IR_URL");
+const SP_SIGNAL_REFERENCE_DEPOSIT_CDP = requireNumberEnv("SP_SIGNAL_REFERENCE_DEPOSIT_CDP");
 
-function fmtPct(n) {
+function getCdpUsdPrice(db) {
+  const priceMap = loadPriceCache(db).get("FLR");
+  const price = Number(priceMap?.get("CDP"));
+  return Number.isFinite(price) && price > 0 ? price : null;
+}
+
+function fmtDailyUsd(cdpAmount, cdpUsdPrice) {
+  if (!Number.isFinite(cdpAmount)) return "not yet realized";
+  if (!Number.isFinite(cdpUsdPrice) || cdpUsdPrice <= 0) return "n/a";
+  return `$${(cdpAmount * cdpUsdPrice).toFixed(2)}/day`;
+}
+
+function fmtWhole(n) {
   if (!Number.isFinite(n)) return "n/a";
-  return `${n.toFixed(2)}%`;
-}
-
-function toNumber(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-function inferBranchKey(poolCfg) {
-  const t = `${poolCfg.key || ""} ${poolCfg.label || ""}`.toUpperCase();
-  if (t.includes("FXRP")) return "FXRP";
-  if (t.includes("WFLR")) return "WFLR";
-  return null;
-}
-
-async function fetchJson(url, timeoutMs = 12000) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { signal: ctrl.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
-  } finally {
-    clearTimeout(t);
-  }
+  return new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  }).format(n);
 }
 
 function getConfig(db) {
@@ -79,116 +75,50 @@ function setLastState(db, { topPoolKey }) {
   `).run(topPoolKey || null);
 }
 
-function buildBoardMessage(state) {
+function buildBoardMessage(state, cdpUsdPrice) {
   const lines = [];
   lines.push("Stability signal:");
-  lines.push("APR state (24h realized).");
+  lines.push(`Overall return state (est. daily, ref ${fmtWhole(state.referenceDepositCdp)} CDP).`);
+  lines.push("Includes CDP, APS, and rFLR rewards.");
   lines.push("");
 
   for (const row of state.rows) {
-    const aprText = Number.isFinite(row.apr24hPct) ? fmtPct(row.apr24hPct) : "not yet realized";
-    const shortLabel = String(row.collSymbol || row.label || "").toUpperCase().includes("WFLR")
-      ? "WFLR"
-      : String(row.collSymbol || row.label || "").toUpperCase().includes("FXRP")
-        ? "FXRP"
-        : row.label;
-    lines.push(`${shortLabel}: ${aprText}`);
+    lines.push(`${getPoolShortLabel(row)}: ${fmtDailyUsd(row.dailyReturn, cdpUsdPrice)}`);
   }
 
   lines.push("");
   if (state.top) {
-    const topLabel = String(state.top.collSymbol || state.top.label || "").toUpperCase().includes("WFLR")
-      ? "WFLR"
-      : String(state.top.collSymbol || state.top.label || "").toUpperCase().includes("FXRP")
-        ? "FXRP"
-        : state.top.label;
-    lines.push(`Higher rate: ${topLabel}.`);
+    lines.push(`Current highest total return: ${getPoolShortLabel(state.top)}`);
   } else {
-    lines.push("Higher rate: undetermined.");
+    lines.push("Current highest total return: undetermined.");
   }
 
   return lines.join("\n");
 }
 
-function parseBranchApr(branchObj) {
-  if (!branchObj || typeof branchObj !== "object") {
-    return { totalPct: null, feePct: null, apsPct: null, rflrPct: null };
+async function readState(db) {
+  const snapshots = getLatestStabilityPoolSnapshots(db, "FLR");
+  if (!snapshots.length) {
+    return { rows: [], top: null, referenceDepositCdp: SP_SIGNAL_REFERENCE_DEPOSIT_CDP };
   }
 
-  const total = toNumber(branchObj.sp_apy_1d_total);
-  const fee = toNumber(branchObj.sp_apy_avg_1d);
-  const aps = toNumber(branchObj?.incentives?.aps?.apy_1d);
-  const rflr = toNumber(branchObj?.incentives?.rflr?.apy_1d);
-
-  const summed =
-    (fee == null ? 0 : fee) +
-    (aps == null ? 0 : aps) +
-    (rflr == null ? 0 : rflr);
+  const rows = recommendSinglePoolAllocation(snapshots, SP_SIGNAL_REFERENCE_DEPOSIT_CDP);
+  const top = rows.length ? rows[0] : null;
+  const topKey = top?.poolKey || null;
+  for (const row of rows) {
+    row.key = row.poolKey;
+    row.isTop = !!topKey && row.poolKey === topKey;
+  }
 
   return {
-    totalPct: total != null ? total * 100 : (fee != null || aps != null || rflr != null ? summed * 100 : null),
-    feePct: fee == null ? null : fee * 100,
-    apsPct: aps == null ? null : aps * 100,
-    rflrPct: rflr == null ? null : rflr * 100,
+    rows,
+    top,
+    referenceDepositCdp: SP_SIGNAL_REFERENCE_DEPOSIT_CDP,
   };
 }
 
-async function readState(_db) {
-  const pools = getStabilityPoolsForChain("FLR");
-  if (!pools.length) {
-    return { rows: [], top: null };
-  }
-
-  let json;
-  try {
-    json = await fetchJson(GLOBAL_IR_URL);
-  } catch (err) {
-    logger.warn(`[sp-apr] failed to fetch json: ${err?.message || err}`);
-    return {
-      rows: pools.map((poolCfg) => ({
-        chainId: poolCfg.chainId,
-        key: poolCfg.key,
-        label: poolCfg.label,
-        collSymbol: inferBranchKey(poolCfg) || null,
-        apr24hPct: null,
-      })),
-      top: null,
-    };
-  }
-
-  const rows = pools.map((poolCfg) => {
-    const branchKey = inferBranchKey(poolCfg);
-    const branchObj = branchKey ? json?.branch?.[branchKey] : null;
-    const apr = parseBranchApr(branchObj);
-
-    return {
-      chainId: poolCfg.chainId,
-      key: poolCfg.key,
-      label: poolCfg.label,
-      collSymbol: branchKey,
-      apr24hPct: apr.totalPct,
-      fee24hPct: apr.feePct,
-      aps24hPct: apr.apsPct,
-      rflr24hPct: apr.rflrPct,
-    };
-  });
-
-  const finite = rows.filter((r) => Number.isFinite(r.apr24hPct));
-  let top = null;
-  if (finite.length) {
-    top = [...finite].sort((a, b) => b.apr24hPct - a.apr24hPct)[0];
-  }
-
-  const topKey = top?.key || null;
-  for (const r of rows) {
-    r.isTop = !!topKey && r.key === topKey;
-  }
-
-  return { rows, top };
-}
-
 async function notifySubscribersOnFlip(client, db, { prevTopKey, nextTop }) {
-  const nextTopKey = nextTop?.key || null;
+  const nextTopKey = nextTop?.poolKey || null;
   if (!prevTopKey || !nextTopKey || prevTopKey === nextTopKey) return;
 
   const rows = db.prepare(`
@@ -202,15 +132,11 @@ async function notifySubscribersOnFlip(client, db, { prevTopKey, nextTop }) {
     `UPDATE users SET accepts_dm = ?, updated_at = datetime('now') WHERE id = ?`
   );
 
-  const winner = String(nextTop.collSymbol || nextTop.label || "").toUpperCase().includes("WFLR")
-    ? "WFLR"
-    : String(nextTop.collSymbol || nextTop.label || "").toUpperCase().includes("FXRP")
-      ? "FXRP"
-      : nextTop.label;
+  const winner = getPoolShortLabel(nextTop);
   const msg = [
     "Stability signal:",
-    "APR state changed.",
-    `Current higher rate: ${winner} (${fmtPct(nextTop.apr24hPct)}).`
+    "Return state changed.",
+    `Current highest total return: ${winner}`
   ].join("\n");
 
   for (const row of rows) {
@@ -249,7 +175,7 @@ async function updateBoardMessage(client, db, state) {
     return { previousTopKey: cfg?.last_top_pool_key || null };
   }
 
-  const content = buildBoardMessage(state);
+  const content = buildBoardMessage(state, getCdpUsdPrice(db));
   await message.edit(content);
   return { previousTopKey: cfg?.last_top_pool_key || null };
 }
@@ -262,7 +188,7 @@ async function runOnce(client) {
     prevTopKey: previousTopKey,
     nextTop: state.top,
   });
-  setLastState(db, { topPoolKey: state.top?.key || null });
+  setLastState(db, { topPoolKey: state.top?.poolKey || null });
 }
 
 async function readCurrentBoardStateForCommand() {
@@ -310,4 +236,5 @@ module.exports = {
   getConfig,
   buildBoardMessage,
   SP_APR_REACTION_EMOJI,
+  SP_APR_CHANNEL_ID,
 };
