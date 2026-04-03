@@ -35,6 +35,7 @@ const {
 } = require("./testOffsets");
 const logger = require("../utils/logger");
 const { shortenTroveId } = require("../utils/ethers/shortenTroveId");
+const { getPrimefiLoanSummaries, refreshPrimefiLoanSnapshots } = require("./primefiLoanMonitor");
 
 // -----------------------------
 // Chains
@@ -1170,11 +1171,22 @@ async function getLoanSummaries(userId = null) {
     } catch (_) {}
   }
 
+  out.push(...getPrimefiLoanSummaries(userId));
+  out.sort((a, b) => {
+    const ca = String(a.chainId || "");
+    const cb = String(b.chainId || "");
+    if (ca !== cb) return ca.localeCompare(cb);
+    const pa = String(a.protocol || "");
+    const pb = String(b.protocol || "");
+    if (pa !== pb) return pa.localeCompare(pb);
+    return String(a.tokenId ?? a.positionId ?? "").localeCompare(String(b.tokenId ?? b.positionId ?? ""));
+  });
   return out;
 }
 
 async function refreshLoanSnapshots() {
   const runId = String(Date.now());
+  await refreshPrimefiLoanSnapshots(runId);
   const rows = getMonitoredLoanRows();
   const sharedContractContext = new Map();
   if (!rows.length) return sharedContractContext;
