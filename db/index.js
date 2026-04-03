@@ -511,6 +511,66 @@ function initSchema(db) {
   CREATE INDEX IF NOT EXISTS idx_alert_log_user_created      ON alert_log(user_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_alert_log_position          ON alert_log(wallet_id, contract_id, token_id);
   CREATE INDEX IF NOT EXISTS idx_loan_snapshots_user         ON loan_position_snapshots(user_id);
+
+  CREATE TABLE IF NOT EXISTS primefi_loan_position_snapshots (
+    user_id         INTEGER NOT NULL,
+    wallet_id       INTEGER NOT NULL,
+    chain_id        TEXT NOT NULL,
+    protocol        TEXT NOT NULL,
+    market_key      TEXT NOT NULL,
+    wallet_label    TEXT,
+    snapshot_run_id TEXT NOT NULL,
+    snapshot_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    snapshot_json   TEXT NOT NULL,
+    PRIMARY KEY (user_id, wallet_id, chain_id, protocol, market_key),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (wallet_id) REFERENCES user_wallets(id) ON DELETE CASCADE,
+    FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE RESTRICT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_primefi_loan_snapshots_user ON primefi_loan_position_snapshots(user_id);
+
+  CREATE TABLE IF NOT EXISTS primefi_market_event_cursors (
+    chain_id           TEXT NOT NULL,
+    market_key         TEXT NOT NULL,
+    start_block        INTEGER NOT NULL DEFAULT 0,
+    last_scanned_block INTEGER NOT NULL DEFAULT 0,
+    last_scanned_at    TEXT,
+    PRIMARY KEY (chain_id, market_key)
+  );
+
+  CREATE TABLE IF NOT EXISTS primefi_market_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    chain_id      TEXT NOT NULL,
+    market_key    TEXT NOT NULL,
+    protocol      TEXT NOT NULL,
+    block_number  INTEGER NOT NULL,
+    tx_hash       TEXT NOT NULL,
+    log_index     INTEGER NOT NULL,
+    event_name    TEXT NOT NULL,
+    user_lower    TEXT,
+    event_json    TEXT NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (market_key, tx_hash, log_index)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_primefi_market_events_lookup ON primefi_market_events(chain_id, market_key, user_lower, block_number, log_index);
+
+  CREATE TABLE IF NOT EXISTS primefi_loan_position_snapshot_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL,
+    wallet_id       INTEGER NOT NULL,
+    chain_id        TEXT NOT NULL,
+    protocol        TEXT NOT NULL,
+    market_key      TEXT NOT NULL,
+    snapshot_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    snapshot_json   TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (wallet_id) REFERENCES user_wallets(id) ON DELETE CASCADE,
+    FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE RESTRICT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_primefi_loan_history_lookup ON primefi_loan_position_snapshot_history(user_id, wallet_id, chain_id, protocol, market_key, snapshot_at);
   CREATE INDEX IF NOT EXISTS idx_lp_snapshots_user           ON lp_position_snapshots(user_id);
   CREATE INDEX IF NOT EXISTS idx_index_streams_chain_enabled ON index_streams(chain_id, is_enabled);
   CREATE INDEX IF NOT EXISTS idx_index_streams_contract_event ON index_streams(contract_id, event_name);
