@@ -733,6 +733,7 @@ CREATE TABLE primefi_market_events (
   market_key    TEXT NOT NULL,
   protocol      TEXT NOT NULL,
   block_number  INTEGER NOT NULL,
+  block_timestamp INTEGER,
   tx_hash       TEXT NOT NULL,
   log_index     INTEGER NOT NULL,
   event_name    TEXT NOT NULL,
@@ -744,6 +745,9 @@ CREATE TABLE primefi_market_events (
 
 CREATE INDEX idx_primefi_market_events_lookup
   ON primefi_market_events(chain_id, market_key, user_lower, block_number, log_index);
+
+CREATE INDEX idx_primefi_market_events_user_time
+  ON primefi_market_events(chain_id, market_key, user_lower, block_timestamp);
 
 CREATE TABLE primefi_loan_position_snapshot_history (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,

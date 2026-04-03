@@ -64,6 +64,16 @@ function amountNum(raw, decimals) {
   } catch { return null; }
 }
 
+async function getBlockTimestamp(provider, cache, blockNumber) {
+  const key = Number(blockNumber);
+  if (!Number.isInteger(key) || key <= 0) return null;
+  if (cache.has(key)) return cache.get(key);
+  const block = await provider.getBlock(key);
+  const ts = block && Number.isInteger(Number(block.timestamp)) ? Number(block.timestamp) : null;
+  cache.set(key, ts);
+  return ts;
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   const provider = new ethers.JsonRpcProvider(XDC_RPC_URL);
@@ -83,12 +93,14 @@ async function main() {
   const getCursor = db.prepare(`SELECT * FROM primefi_market_event_cursors WHERE chain_id = ? AND market_key = ?`);
   const insertEvent = db.prepare(`
     INSERT INTO primefi_market_events (
-      chain_id, market_key, protocol, block_number, tx_hash, log_index, event_name, user_lower, event_json
+      chain_id, market_key, protocol, block_number, block_timestamp, tx_hash, log_index, event_name, user_lower, event_json
     ) VALUES (
-      @chain_id, @market_key, @protocol, @block_number, @tx_hash, @log_index, @event_name, @user_lower, @event_json
+      @chain_id, @market_key, @protocol, @block_number, @block_timestamp, @tx_hash, @log_index, @event_name, @user_lower, @event_json
     )
     ON CONFLICT(market_key, tx_hash, log_index) DO NOTHING
   `);
+
+  const blockTimestampCache = new Map();
 
   for (const market of markets) {
     const cursor = getCursor.get('XDC', market.key);
@@ -172,11 +184,13 @@ async function main() {
           eventObj.receiveAToken = Boolean(args.receiveAToken);
         }
         if (!include) continue;
+        const blockTimestamp = await getBlockTimestamp(provider, blockTimestampCache, lg.blockNumber);
         insertEvent.run({
           chain_id: 'XDC',
           market_key: market.key,
           protocol: market.protocol,
           block_number: lg.blockNumber,
+          block_timestamp: blockTimestamp,
           tx_hash: lg.transactionHash,
           log_index: lg.index,
           event_name: name,
