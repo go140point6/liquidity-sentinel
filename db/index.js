@@ -545,6 +545,7 @@ function initSchema(db) {
     market_key    TEXT NOT NULL,
     protocol      TEXT NOT NULL,
     block_number  INTEGER NOT NULL,
+    block_timestamp INTEGER,
     tx_hash       TEXT NOT NULL,
     log_index     INTEGER NOT NULL,
     event_name    TEXT NOT NULL,
@@ -732,6 +733,8 @@ function initSchema(db) {
   ensureColumn("sp_apr_snapshots", "fee_24h_pct", "REAL");
   ensureColumn("sp_apr_snapshots", "aps_24h_pct", "REAL");
   ensureColumn("sp_apr_snapshots", "rflr_24h_pct", "REAL");
+  ensureColumn("primefi_market_events", "block_timestamp", "INTEGER");
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_primefi_market_events_user_time ON primefi_market_events(chain_id, market_key, user_lower, block_timestamp)`);
   ensureColumn("users", "heartbeat_hour", "INTEGER NOT NULL DEFAULT 3");
   ensureColumn("users", "heartbeat_enabled", "INTEGER NOT NULL DEFAULT 1");
   ensureColumn("users", "heartbeat_tz", "TEXT NOT NULL DEFAULT 'America/Los_Angeles'");
