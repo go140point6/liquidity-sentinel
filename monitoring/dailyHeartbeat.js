@@ -196,11 +196,12 @@ function loanMeaning(tier, kind, aheadPctText) {
 
 function formatLoanField(s, priceCache) {
   const rawId = s.troveId ?? s.tokenId ?? s.positionId ?? "?";
+  const idKind = s.positionLabel || "Trove";
   const troveId = shortenTroveId(rawId);
   const troveLink = formatLoanTroveLink(s.protocol, rawId, troveId);
   const title = `${s.protocol || "UNKNOWN"} (${s.chainId || "?"})`;
   const lines = [];
-  lines.push(`Trove: ${troveLink}`);
+  lines.push(`${idKind}: ${troveLink}`);
   if (s.owner) {
     const walletText = formatAddressLink(s.chainId, s.owner) || shortenAddress(s.owner);
     lines.push(`Wallet: ${walletText}`);
@@ -211,7 +212,22 @@ function formatLoanField(s, priceCache) {
   lines.push(`Status: ${status}`);
   const debtText =
     typeof s.debtAmount === "number" && Number.isFinite(s.debtAmount) ? fmtDebt.format(s.debtAmount) : "n/a";
-  lines.push(`Debt: ${debtText}`);
+  lines.push(`Debt: ${debtText}${s.debtSymbol ? ` ${s.debtSymbol}` : ""}`);
+  if (s.kind === "PRIMEFI_ACCOUNT") {
+    if (s.carry24h) {
+      const c = s.carry24h;
+      lines.push(`24h carry: ${typeof c.netCarryUsd === "number" && Number.isFinite(c.netCarryUsd) ? fmtUsd(c.netCarryUsd) : "n/a"}`);
+      const collText = typeof c.collateralDeltaUsd === "number" && Number.isFinite(c.collateralDeltaUsd)
+        ? `${c.collateralDeltaUsd > 0 ? "+" : c.collateralDeltaUsd < 0 ? "-" : ""}${fmtUsd(Math.abs(Number(c.collateralDeltaUsd)))}`
+        : "n/a";
+      const debtText = typeof c.debtDeltaUsd === "number" && Number.isFinite(c.debtDeltaUsd)
+        ? `${c.debtDeltaUsd > 0 ? "+" : c.debtDeltaUsd < 0 ? "-" : ""}${fmtUsd(Math.abs(Number(c.debtDeltaUsd)))}`
+        : "n/a";
+      lines.push(`24h spot moves: Collateral ${collText} | Debt ${debtText}`);
+    } else {
+      lines.push(`24h carry: n/a (awaiting 24h baseline)`);
+    }
+  }
   lines.push("");
 
   if (s.hasPrice && typeof s.price === "number" && typeof s.liquidationPrice === "number") {
@@ -234,6 +250,9 @@ function formatLoanField(s, priceCache) {
         s.liquidationPrice
       )} | Buffer: ${bufferText} (${liqTier})`
     );
+    if (typeof s.healthFactor === 'number' && Number.isFinite(s.healthFactor)) {
+      lines.push(`Health factor: ${s.healthFactor.toFixed(2)}`);
+    }
     lines.push(`Meaning: ${loanMeaning(s.liquidationTier, "LIQUIDATION")}`);
     lines.push("");
   } else {
