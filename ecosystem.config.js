@@ -66,6 +66,17 @@ module.exports = {
       },
     },
     {
+      name: "primefi-market-tail",
+      script: "jobs/scanPrimefiMarketEvents.js",
+      interpreter: "node",
+      autorestart: false,
+      cron_restart: "6,36 * * * *",
+      time: true,
+      env: {
+        NODE_ENV: "production",
+      },
+    },
+    {
       name: "index-daily-integrity",
       script: "jobs/indexDailyIntegrity.js",
       interpreter: "node",
