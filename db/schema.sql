@@ -8,6 +8,9 @@ DROP TABLE IF EXISTS alert_state;
 DROP TABLE IF EXISTS position_ignores;
 DROP TABLE IF EXISTS firelight_subscriptions;
 DROP TABLE IF EXISTS firelight_config;
+DROP TABLE IF EXISTS sp_apr_subscriptions;
+DROP TABLE IF EXISTS sp_apr_config;
+DROP TABLE IF EXISTS sp_apr_snapshots;
 DROP TABLE IF EXISTS redemption_rate_snapshots;
 
 DROP TABLE IF EXISTS global_params;
@@ -244,6 +247,18 @@ CREATE TABLE price_cache (
   PRIMARY KEY (chain_id, symbol)
 );
 
+CREATE TABLE price_cache_history (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  chain_id   TEXT NOT NULL,
+  symbol     TEXT NOT NULL,
+  price_usd  REAL NOT NULL,
+  source     TEXT,
+  fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_price_cache_history_chain_symbol_time
+  ON price_cache_history(chain_id, symbol, fetched_at);
+
 -- =========================================================
 -- INDEX STREAMS / CURSORS / BACKFILL
 -- =========================================================
@@ -344,6 +359,63 @@ CREATE INDEX idx_chain_events_contract_block ON chain_events(contract_id, block_
 CREATE INDEX idx_chain_events_chain_block ON chain_events(chain_id, block_number, log_index);
 
 -- =========================================================
+-- ALM SHARE FLOW LEDGER (derived from chain_events Transfer logs)
+-- =========================================================
+CREATE TABLE alm_share_flows (
+  event_id      INTEGER PRIMARY KEY,
+  chain_id      TEXT NOT NULL,
+  contract_id   INTEGER NOT NULL,
+  stream_id     INTEGER NOT NULL,
+  block_number  INTEGER NOT NULL CHECK (block_number >= 0),
+  tx_hash       TEXT NOT NULL,
+  log_index     INTEGER NOT NULL CHECK (log_index >= 0),
+  from_lower    TEXT NOT NULL,
+  from_eip55    TEXT NOT NULL,
+  to_lower      TEXT NOT NULL,
+  to_eip55      TEXT NOT NULL,
+  amount_raw    TEXT NOT NULL,
+  flow_kind     TEXT NOT NULL CHECK (flow_kind IN ('MINT','BURN','TRANSFER')),
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (event_id) REFERENCES chain_events(id) ON DELETE CASCADE,
+  FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE CASCADE,
+  FOREIGN KEY (contract_id) REFERENCES contracts(id) ON DELETE CASCADE,
+  FOREIGN KEY (stream_id) REFERENCES index_streams(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_alm_share_flows_contract_block ON alm_share_flows(contract_id, block_number, log_index);
+CREATE INDEX idx_alm_share_flows_from ON alm_share_flows(contract_id, from_lower, block_number);
+CREATE INDEX idx_alm_share_flows_to ON alm_share_flows(contract_id, to_lower, block_number);
+
+-- =========================================================
+-- ALM POSITION BASELINES (per user position)
+-- =========================================================
+CREATE TABLE alm_position_baselines (
+  user_id             INTEGER NOT NULL,
+  wallet_id           INTEGER NOT NULL,
+  contract_id         INTEGER NOT NULL,
+  token_id            TEXT NOT NULL,
+  chain_id            TEXT NOT NULL,
+  protocol            TEXT NOT NULL,
+  token0_symbol       TEXT,
+  token1_symbol       TEXT,
+  baseline_snapshot_at TEXT NOT NULL DEFAULT (datetime('now')),
+  baseline_amount0    REAL,
+  baseline_amount1    REAL,
+  baseline_shares_raw TEXT NOT NULL,
+  baseline_share_pct  REAL,
+  created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, wallet_id, contract_id, token_id),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (wallet_id) REFERENCES user_wallets(id) ON DELETE CASCADE,
+  FOREIGN KEY (contract_id) REFERENCES contracts(id) ON DELETE CASCADE,
+  FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_alm_baselines_user ON alm_position_baselines(user_id);
+CREATE INDEX idx_alm_baselines_contract ON alm_position_baselines(contract_id, token_id);
+
+-- =========================================================
 -- USERS
 -- =========================================================
 CREATE TABLE users (
@@ -381,6 +453,67 @@ CREATE TABLE firelight_subscriptions (
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+
+CREATE TABLE sp_apr_config (
+  id                INTEGER PRIMARY KEY CHECK (id = 1),
+  channel_id        TEXT NOT NULL,
+  message_id        TEXT NOT NULL,
+  last_top_pool_key TEXT,
+  last_checked_at   TEXT,
+  created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE sp_apr_subscriptions (
+  user_id     INTEGER PRIMARY KEY,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE sp_apr_snapshots (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  chain_id              TEXT NOT NULL,
+  pool_key              TEXT NOT NULL,
+  pool_address          TEXT NOT NULL,
+  pool_label            TEXT NOT NULL,
+  coll_symbol           TEXT,
+  total_bold_deposits   TEXT,
+  total_bold_deposits_num REAL,
+  current_scale         TEXT,
+  p_value               TEXT,
+  scale_b_value         TEXT,
+  index_value           REAL,
+  apr_24h_pct           REAL,
+  fee_24h_pct           REAL,
+  aps_24h_pct           REAL,
+  rflr_24h_pct          REAL,
+  created_at            TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_sp_apr_snapshots_chain_pool_time
+  ON sp_apr_snapshots(chain_id, pool_key, created_at);
+
+CREATE TABLE sp_position_snapshots (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL,
+  wallet_id     INTEGER NOT NULL,
+  chain_id      TEXT NOT NULL,
+  pool_key      TEXT NOT NULL,
+  pool_address  TEXT NOT NULL,
+  pool_label    TEXT NOT NULL,
+  snapshot_json TEXT NOT NULL,
+  snapshot_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (wallet_id) REFERENCES user_wallets(id) ON DELETE CASCADE,
+  FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE RESTRICT,
+  UNIQUE (user_id, wallet_id, chain_id, pool_key)
+);
+
+CREATE INDEX idx_sp_position_snapshots_user_time
+  ON sp_position_snapshots(user_id, snapshot_at);
 
 -- =========================================================
 -- REDEMPTION RATE SNAPSHOTS (per contract)
@@ -565,6 +698,73 @@ CREATE TABLE lp_position_snapshots (
 
 CREATE INDEX idx_loan_snapshots_user
   ON loan_position_snapshots(user_id);
+
+CREATE TABLE primefi_loan_position_snapshots (
+  user_id         INTEGER NOT NULL,
+  wallet_id       INTEGER NOT NULL,
+  chain_id        TEXT NOT NULL,
+  protocol        TEXT NOT NULL,
+  market_key      TEXT NOT NULL,
+  wallet_label    TEXT,
+  snapshot_run_id TEXT NOT NULL,
+  snapshot_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  snapshot_json   TEXT NOT NULL,
+  PRIMARY KEY (user_id, wallet_id, chain_id, protocol, market_key),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (wallet_id) REFERENCES user_wallets(id) ON DELETE CASCADE,
+  FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE RESTRICT
+);
+
+CREATE INDEX idx_primefi_loan_snapshots_user
+  ON primefi_loan_position_snapshots(user_id);
+
+CREATE TABLE primefi_market_event_cursors (
+  chain_id          TEXT NOT NULL,
+  market_key        TEXT NOT NULL,
+  start_block       INTEGER NOT NULL DEFAULT 0,
+  last_scanned_block INTEGER NOT NULL DEFAULT 0,
+  last_scanned_at   TEXT,
+  PRIMARY KEY (chain_id, market_key)
+);
+
+CREATE TABLE primefi_market_events (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  chain_id      TEXT NOT NULL,
+  market_key    TEXT NOT NULL,
+  protocol      TEXT NOT NULL,
+  block_number  INTEGER NOT NULL,
+  block_timestamp INTEGER,
+  tx_hash       TEXT NOT NULL,
+  log_index     INTEGER NOT NULL,
+  event_name    TEXT NOT NULL,
+  user_lower    TEXT,
+  event_json    TEXT NOT NULL,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (market_key, tx_hash, log_index)
+);
+
+CREATE INDEX idx_primefi_market_events_lookup
+  ON primefi_market_events(chain_id, market_key, user_lower, block_number, log_index);
+
+CREATE INDEX idx_primefi_market_events_user_time
+  ON primefi_market_events(chain_id, market_key, user_lower, block_timestamp);
+
+CREATE TABLE primefi_loan_position_snapshot_history (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id         INTEGER NOT NULL,
+  wallet_id       INTEGER NOT NULL,
+  chain_id        TEXT NOT NULL,
+  protocol        TEXT NOT NULL,
+  market_key      TEXT NOT NULL,
+  snapshot_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  snapshot_json   TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (wallet_id) REFERENCES user_wallets(id) ON DELETE CASCADE,
+  FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE RESTRICT
+);
+
+CREATE INDEX idx_primefi_loan_history_lookup
+  ON primefi_loan_position_snapshot_history(user_id, wallet_id, chain_id, protocol, market_key, snapshot_at);
 
 CREATE INDEX idx_lp_snapshots_user
   ON lp_position_snapshots(user_id);

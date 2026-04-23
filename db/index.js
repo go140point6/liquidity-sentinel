@@ -145,6 +145,15 @@ function initSchema(db) {
     PRIMARY KEY (chain_id, symbol)
   );
 
+  CREATE TABLE IF NOT EXISTS price_cache_history (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chain_id   TEXT NOT NULL,
+    symbol     TEXT NOT NULL,
+    price_usd  REAL NOT NULL,
+    source     TEXT,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS index_streams (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     chain_id      TEXT NOT NULL,
@@ -228,6 +237,50 @@ function initSchema(db) {
     UNIQUE (chain_id, tx_hash, log_index)
   );
 
+  CREATE TABLE IF NOT EXISTS alm_share_flows (
+    event_id      INTEGER PRIMARY KEY,
+    chain_id      TEXT NOT NULL,
+    contract_id   INTEGER NOT NULL,
+    stream_id     INTEGER NOT NULL,
+    block_number  INTEGER NOT NULL CHECK (block_number >= 0),
+    tx_hash       TEXT NOT NULL,
+    log_index     INTEGER NOT NULL CHECK (log_index >= 0),
+    from_lower    TEXT NOT NULL,
+    from_eip55    TEXT NOT NULL,
+    to_lower      TEXT NOT NULL,
+    to_eip55      TEXT NOT NULL,
+    amount_raw    TEXT NOT NULL,
+    flow_kind     TEXT NOT NULL CHECK (flow_kind IN ('MINT','BURN','TRANSFER')),
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (event_id) REFERENCES chain_events(id) ON DELETE CASCADE,
+    FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE CASCADE,
+    FOREIGN KEY (contract_id) REFERENCES contracts(id) ON DELETE CASCADE,
+    FOREIGN KEY (stream_id) REFERENCES index_streams(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS alm_position_baselines (
+    user_id             INTEGER NOT NULL,
+    wallet_id           INTEGER NOT NULL,
+    contract_id         INTEGER NOT NULL,
+    token_id            TEXT NOT NULL,
+    chain_id            TEXT NOT NULL,
+    protocol            TEXT NOT NULL,
+    token0_symbol       TEXT,
+    token1_symbol       TEXT,
+    baseline_snapshot_at TEXT NOT NULL DEFAULT (datetime('now')),
+    baseline_amount0    REAL,
+    baseline_amount1    REAL,
+    baseline_shares_raw TEXT NOT NULL,
+    baseline_share_pct  REAL,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, wallet_id, contract_id, token_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (wallet_id) REFERENCES user_wallets(id) ON DELETE CASCADE,
+    FOREIGN KEY (contract_id) REFERENCES contracts(id) ON DELETE CASCADE,
+    FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE CASCADE
+  );
+
   CREATE TABLE IF NOT EXISTS users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     discord_id    TEXT NOT NULL UNIQUE,
@@ -257,6 +310,67 @@ function initSchema(db) {
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
+
+
+  CREATE TABLE IF NOT EXISTS sp_apr_config (
+    id               INTEGER PRIMARY KEY CHECK (id = 1),
+    channel_id       TEXT NOT NULL,
+    message_id       TEXT NOT NULL,
+    last_top_pool_key TEXT,
+    last_checked_at  TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS sp_apr_subscriptions (
+    user_id     INTEGER PRIMARY KEY,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS sp_apr_snapshots (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    chain_id              TEXT NOT NULL,
+    pool_key              TEXT NOT NULL,
+    pool_address          TEXT NOT NULL,
+    pool_label            TEXT NOT NULL,
+    coll_symbol           TEXT,
+    total_bold_deposits   TEXT,
+    total_bold_deposits_num REAL,
+    current_scale         TEXT,
+    p_value               TEXT,
+    scale_b_value         TEXT,
+    index_value           REAL,
+    apr_24h_pct           REAL,
+    fee_24h_pct           REAL,
+    aps_24h_pct           REAL,
+    rflr_24h_pct          REAL,
+    created_at            TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_sp_apr_snapshots_chain_pool_time
+    ON sp_apr_snapshots(chain_id, pool_key, created_at);
+
+  CREATE TABLE IF NOT EXISTS sp_position_snapshots (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER NOT NULL,
+    wallet_id     INTEGER NOT NULL,
+    chain_id      TEXT NOT NULL,
+    pool_key      TEXT NOT NULL,
+    pool_address  TEXT NOT NULL,
+    pool_label    TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    snapshot_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (wallet_id) REFERENCES user_wallets(id) ON DELETE CASCADE,
+    FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE RESTRICT,
+    UNIQUE (user_id, wallet_id, chain_id, pool_key)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_sp_position_snapshots_user_time
+    ON sp_position_snapshots(user_id, snapshot_at);
 
   CREATE TABLE IF NOT EXISTS user_wallets (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -397,6 +511,67 @@ function initSchema(db) {
   CREATE INDEX IF NOT EXISTS idx_alert_log_user_created      ON alert_log(user_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_alert_log_position          ON alert_log(wallet_id, contract_id, token_id);
   CREATE INDEX IF NOT EXISTS idx_loan_snapshots_user         ON loan_position_snapshots(user_id);
+
+  CREATE TABLE IF NOT EXISTS primefi_loan_position_snapshots (
+    user_id         INTEGER NOT NULL,
+    wallet_id       INTEGER NOT NULL,
+    chain_id        TEXT NOT NULL,
+    protocol        TEXT NOT NULL,
+    market_key      TEXT NOT NULL,
+    wallet_label    TEXT,
+    snapshot_run_id TEXT NOT NULL,
+    snapshot_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    snapshot_json   TEXT NOT NULL,
+    PRIMARY KEY (user_id, wallet_id, chain_id, protocol, market_key),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (wallet_id) REFERENCES user_wallets(id) ON DELETE CASCADE,
+    FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE RESTRICT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_primefi_loan_snapshots_user ON primefi_loan_position_snapshots(user_id);
+
+  CREATE TABLE IF NOT EXISTS primefi_market_event_cursors (
+    chain_id           TEXT NOT NULL,
+    market_key         TEXT NOT NULL,
+    start_block        INTEGER NOT NULL DEFAULT 0,
+    last_scanned_block INTEGER NOT NULL DEFAULT 0,
+    last_scanned_at    TEXT,
+    PRIMARY KEY (chain_id, market_key)
+  );
+
+  CREATE TABLE IF NOT EXISTS primefi_market_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    chain_id      TEXT NOT NULL,
+    market_key    TEXT NOT NULL,
+    protocol      TEXT NOT NULL,
+    block_number  INTEGER NOT NULL,
+    block_timestamp INTEGER,
+    tx_hash       TEXT NOT NULL,
+    log_index     INTEGER NOT NULL,
+    event_name    TEXT NOT NULL,
+    user_lower    TEXT,
+    event_json    TEXT NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (market_key, tx_hash, log_index)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_primefi_market_events_lookup ON primefi_market_events(chain_id, market_key, user_lower, block_number, log_index);
+
+  CREATE TABLE IF NOT EXISTS primefi_loan_position_snapshot_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL,
+    wallet_id       INTEGER NOT NULL,
+    chain_id        TEXT NOT NULL,
+    protocol        TEXT NOT NULL,
+    market_key      TEXT NOT NULL,
+    snapshot_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    snapshot_json   TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (wallet_id) REFERENCES user_wallets(id) ON DELETE CASCADE,
+    FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE RESTRICT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_primefi_loan_history_lookup ON primefi_loan_position_snapshot_history(user_id, wallet_id, chain_id, protocol, market_key, snapshot_at);
   CREATE INDEX IF NOT EXISTS idx_lp_snapshots_user           ON lp_position_snapshots(user_id);
   CREATE INDEX IF NOT EXISTS idx_index_streams_chain_enabled ON index_streams(chain_id, is_enabled);
   CREATE INDEX IF NOT EXISTS idx_index_streams_contract_event ON index_streams(contract_id, event_name);
@@ -406,6 +581,12 @@ function initSchema(db) {
   CREATE INDEX IF NOT EXISTS idx_chain_events_stream_block ON chain_events(stream_id, block_number, log_index);
   CREATE INDEX IF NOT EXISTS idx_chain_events_contract_block ON chain_events(contract_id, block_number, log_index);
   CREATE INDEX IF NOT EXISTS idx_chain_events_chain_block ON chain_events(chain_id, block_number, log_index);
+  CREATE INDEX IF NOT EXISTS idx_price_cache_history_chain_symbol_time ON price_cache_history(chain_id, symbol, fetched_at);
+  CREATE INDEX IF NOT EXISTS idx_alm_share_flows_contract_block ON alm_share_flows(contract_id, block_number, log_index);
+  CREATE INDEX IF NOT EXISTS idx_alm_share_flows_from ON alm_share_flows(contract_id, from_lower, block_number);
+  CREATE INDEX IF NOT EXISTS idx_alm_share_flows_to ON alm_share_flows(contract_id, to_lower, block_number);
+  CREATE INDEX IF NOT EXISTS idx_alm_baselines_user ON alm_position_baselines(user_id);
+  CREATE INDEX IF NOT EXISTS idx_alm_baselines_contract ON alm_position_baselines(contract_id, token_id);
 
   CREATE TRIGGER IF NOT EXISTS trg_contracts_updated_at
   AFTER UPDATE ON contracts
@@ -547,6 +728,13 @@ function initSchema(db) {
   );
 
   ensureColumn("firelight_config", "last_capacity", "TEXT");
+  ensureColumn("sp_apr_snapshots", "total_bold_deposits_num", "REAL");
+  ensureColumn("sp_apr_snapshots", "apr_24h_pct", "REAL");
+  ensureColumn("sp_apr_snapshots", "fee_24h_pct", "REAL");
+  ensureColumn("sp_apr_snapshots", "aps_24h_pct", "REAL");
+  ensureColumn("sp_apr_snapshots", "rflr_24h_pct", "REAL");
+  ensureColumn("primefi_market_events", "block_timestamp", "INTEGER");
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_primefi_market_events_user_time ON primefi_market_events(chain_id, market_key, user_lower, block_timestamp)`);
   ensureColumn("users", "heartbeat_hour", "INTEGER NOT NULL DEFAULT 3");
   ensureColumn("users", "heartbeat_enabled", "INTEGER NOT NULL DEFAULT 1");
   ensureColumn("users", "heartbeat_tz", "TEXT NOT NULL DEFAULT 'America/Los_Angeles'");

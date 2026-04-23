@@ -56,7 +56,7 @@ async function fetchLiquityPrices(url) {
   const out = {};
   for (const [k, v] of Object.entries(prices)) {
     const n = Number(v);
-    if (Number.isFinite(n)) out[k.toUpperCase()] = n;
+    if (Number.isFinite(n) && n > 0) out[k.toUpperCase()] = n;
   }
   return out;
 }
@@ -65,11 +65,36 @@ async function fetchCryptoCompareXdc() {
   const url = "https://min-api.cryptocompare.com/data/price?fsym=XDC&tsyms=USDT";
   const json = await fetchJson(url);
   const n = Number(json?.USDT);
-  return Number.isFinite(n) ? n : null;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function getSparkdexPriceApiBase() {
+  const raw = String(process.env.SPARKDEX_PRICE_API_BASE || "").trim();
+  if (!raw) return "https://api.sparkdex.ai/price/latest";
+  return raw;
+}
+
+async function fetchSparkdexPrices(symbols) {
+  const uniq = [...new Set((symbols || []).map((s) => String(s || "").trim()).filter(Boolean))];
+  if (!uniq.length) return {};
+
+  const base = getSparkdexPriceApiBase();
+  const qs = new URLSearchParams({ symbols: uniq.join(",") });
+  const url = `${base}?${qs.toString()}`;
+  const json = await fetchJson(url);
+
+  const out = {};
+  for (const [rawSym, rawPrice] of Object.entries(json || {})) {
+    const sym = normalizeSymbol(rawSym);
+    const price = Number(rawPrice);
+    if (!sym || !Number.isFinite(price) || price <= 0) continue;
+    out[sym] = price;
+  }
+  return out;
 }
 
 function upsertPrice(db, chainId, symbol, priceUsd, source) {
-  if (!Number.isFinite(priceUsd)) return;
+  if (!Number.isFinite(priceUsd) || priceUsd <= 0) return;
   db.prepare(
     `
     INSERT INTO price_cache (chain_id, symbol, price_usd, source, fetched_at)
@@ -78,6 +103,13 @@ function upsertPrice(db, chainId, symbol, priceUsd, source) {
       price_usd = excluded.price_usd,
       source = excluded.source,
       fetched_at = datetime('now')
+  `
+  ).run(chainId, symbol, priceUsd, source);
+
+  db.prepare(
+    `
+    INSERT INTO price_cache_history (chain_id, symbol, price_usd, source, fetched_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
   `
   ).run(chainId, symbol, priceUsd, source);
 }
@@ -91,28 +123,41 @@ async function refreshPriceCache(db, symbolsByChain) {
     }
   }
 
+  const resolved = new Set();
   const stableEntries = [];
   const liqTargets = [];
   const xdcTargets = [];
+  const sparkdexTargets = [];
 
   for (const { chainId, symbol } of wanted.values()) {
     if (!symbol) continue;
-    if (isStableUsd(chainId, symbol)) {
-      stableEntries.push({ chainId, symbol });
+    const norm = normalizeSymbol(symbol);
+    if (!norm) continue;
+
+    if (isStableUsd(chainId, norm)) {
+      stableEntries.push({ chainId, symbol: norm });
       continue;
     }
-    const liqKey = LIQ_PRICE_KEY_BY_SYMBOL[normalizeSymbol(symbol)];
+
+    const liqKey = LIQ_PRICE_KEY_BY_SYMBOL[norm];
     if (liqKey) {
-      liqTargets.push({ chainId, symbol, liqKey });
+      liqTargets.push({ chainId, symbol: norm, liqKey });
       continue;
     }
-    if (normalizeSymbol(symbol) === "XDC" || normalizeSymbol(symbol) === "WXDC") {
-      xdcTargets.push({ chainId, symbol });
+
+    if (norm === "XDC" || norm === "WXDC") {
+      xdcTargets.push({ chainId, symbol: norm });
+      continue;
+    }
+
+    if (String(chainId || "").toUpperCase() === "FLR") {
+      sparkdexTargets.push({ chainId, symbol: norm });
     }
   }
 
   for (const entry of stableEntries) {
     upsertPrice(db, entry.chainId, entry.symbol, 1.0, "stable");
+    resolved.add(`${entry.chainId}|${entry.symbol}`);
   }
 
   if (liqTargets.length) {
@@ -125,8 +170,9 @@ async function refreshPriceCache(db, symbolsByChain) {
       logger.debug(`[priceCache] liquity-json prices: ${pairs}`);
       for (const t of liqTargets) {
         const price = priceByKey[t.liqKey];
-        if (Number.isFinite(price)) {
+        if (Number.isFinite(price) && price > 0) {
           upsertPrice(db, t.chainId, t.symbol, price, "liquity-json");
+          resolved.add(`${t.chainId}|${t.symbol}`);
         }
       }
     } catch (err) {
@@ -140,13 +186,38 @@ async function refreshPriceCache(db, symbolsByChain) {
       if (Number.isFinite(xdcPrice)) {
         logger.debug(`[priceCache] cryptocompare XDC price: ${xdcPrice}`);
       }
-      if (Number.isFinite(xdcPrice)) {
+      if (Number.isFinite(xdcPrice) && xdcPrice > 0) {
         for (const t of xdcTargets) {
           upsertPrice(db, t.chainId, t.symbol, xdcPrice, "cryptocompare");
+          resolved.add(`${t.chainId}|${t.symbol}`);
         }
       }
     } catch (err) {
       logger.warn(`[priceCache] cryptocompare fetch failed: ${err.message || err}`);
+    }
+  }
+
+  if (sparkdexTargets.length) {
+    const unresolved = sparkdexTargets.filter((t) => !resolved.has(`${t.chainId}|${t.symbol}`));
+    if (unresolved.length) {
+      try {
+        const symbols = unresolved.map((t) => t.symbol);
+        const sparkPrices = await fetchSparkdexPrices(symbols);
+        const pairs = Object.entries(sparkPrices)
+          .map(([k, v]) => `${k}=${v}`)
+          .join(", ");
+        logger.debug(`[priceCache] sparkdex prices: ${pairs}`);
+
+        for (const t of unresolved) {
+          const price = sparkPrices[t.symbol];
+          if (Number.isFinite(price) && price > 0) {
+            upsertPrice(db, t.chainId, t.symbol, price, "sparkdex-api");
+            resolved.add(`${t.chainId}|${t.symbol}`);
+          }
+        }
+      } catch (err) {
+        logger.warn(`[priceCache] sparkdex price fetch failed: ${err.message || err}`);
+      }
     }
   }
 }

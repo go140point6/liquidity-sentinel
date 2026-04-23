@@ -19,32 +19,6 @@ const { shortenTroveId } = require("../../utils/ethers/shortenTroveId");
 const { formatAddressLink, formatLpPositionLink } = require("../../utils/links");
 const EMBED_FIELD_VALUE_MAX = 1024;
 
-const EMBED_FIELD_VALUE_MAX = 1024;
-
-function chunkLinesForEmbed(lines, maxLen = EMBED_FIELD_VALUE_MAX) {
-  const chunks = [];
-  let cur = "";
-  for (const raw of lines || []) {
-    const line = String(raw || "");
-    if (!line) continue;
-
-    if (!cur) {
-      cur = line.slice(0, maxLen);
-      continue;
-    }
-
-    if (cur.length + 1 + line.length <= maxLen) {
-      cur += `\n${line}`;
-      continue;
-    }
-
-    chunks.push(cur);
-    cur = line.slice(0, maxLen);
-  }
-  if (cur) chunks.push(cur);
-  return chunks;
-}
-
 // ===================== UI LOCK START =====================
 const IG_LOCK_TTL_MS = 2500;
 const igLocks = new Map(); // actorId -> { until:number, seq:number }
@@ -272,13 +246,14 @@ function buildMainEmbed({ discordName, ignores }) {
     return `• **${kind}** ${r.chain_id} **${r.protocol || "UNKNOWN"}** | ${wl}${walletLink} | ID **${idDisplay}**`;
   });
 
-  const tail = ignores.length > 15 ? `…and ${ignores.length - 15} more` : null;
-  const chunks = chunkLinesForEmbed([...lines, ...(tail ? [tail] : [])]);
+  if (ignores.length > 15) lines.push(`…and ${ignores.length - 15} more`);
+  const chunks = chunkLinesForEmbed(lines);
   for (let i = 0; i < chunks.length; i += 1) {
     const suffix = chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : "";
     embed.addFields({
       name: `Current ignores (${ignores.length})${suffix}`,
       value: chunks[i],
+      inline: false,
     });
   }
 

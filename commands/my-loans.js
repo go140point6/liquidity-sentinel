@@ -247,15 +247,17 @@ module.exports = {
 
       const fields = summaries.map((s) => {
         const rawId = s.troveId ?? s.tokenId ?? s.positionId ?? "?";
+        const idKind = s.positionLabel || "Trove";
         const idLabel = shortId(rawId);
         const idLink = formatLoanTroveLink(s.protocol, rawId, idLabel);
         const header = `${s.protocol || "UNKNOWN_PROTOCOL"} (${s.chainId || "?"})`;
 
         const valueLines = [];
-        valueLines.push(`Trove: ${idLink}`);
+        valueLines.push(`${idKind}: ${idLink}`);
         if (s.owner) {
           const walletText = formatAddressLink(s.chainId, s.owner) || `**${shortenAddress(s.owner)}**`;
           valueLines.push(`Wallet: ${walletText}`);
+          if (s.walletLabel) valueLines.push(`Label: **${s.walletLabel}**`);
         }
 
         valueLines.push(`Status: **${s.status || "UNKNOWN"}**`);
@@ -270,6 +272,33 @@ module.exports = {
           valueLines.push(`LTV: **${ltvText}**`);
           valueLines.push(`Price / Liq: **${fmtNum5(s.price)} / ${fmtNum5(s.liquidationPrice)}**`);
           valueLines.push(`Liq buffer: **${liqBufferText}** (tier **${s.liquidationTier || "UNKNOWN"}**)`);
+          if (typeof s.healthFactor === "number" && Number.isFinite(s.healthFactor)) {
+            valueLines.push(`Health factor: **${s.healthFactor.toFixed(2)}**`);
+          }
+          {
+            const c = s.carrySinceOrigin || s.carrySinceTracking;
+            const carryLabel = s.carrySinceOrigin ? "Since originated value change" : "Since tracking value change";
+            if (c) {
+              if (typeof c.netCarryUsd === "number" && Number.isFinite(c.netCarryUsd)) {
+                const sign = c.netCarryUsd > 0 ? "+" : c.netCarryUsd < 0 ? "-" : "";
+                valueLines.push(`${carryLabel}: **${sign}${fmtUsd(Math.abs(Number(c.netCarryUsd)))}**`);
+              }
+              if (typeof c.collateralGrowthUsd === "number" && Number.isFinite(c.collateralGrowthUsd)) {
+                const sign = c.collateralGrowthUsd > 0 ? "+" : c.collateralGrowthUsd < 0 ? "-" : "";
+                valueLines.push(`Collateral growth (spot): **${sign}${fmtUsd(Math.abs(Number(c.collateralGrowthUsd)))}**`);
+              } else if (typeof c.collateralDeltaUsd === "number" && Number.isFinite(c.collateralDeltaUsd)) {
+                const sign = c.collateralDeltaUsd > 0 ? "+" : c.collateralDeltaUsd < 0 ? "-" : "";
+                valueLines.push(`Collateral growth (spot): **${sign}${fmtUsd(Math.abs(Number(c.collateralDeltaUsd)))}**`);
+              }
+              if (typeof c.debtGrowthUsd === "number" && Number.isFinite(c.debtGrowthUsd)) {
+                const sign = c.debtGrowthUsd > 0 ? "+" : c.debtGrowthUsd < 0 ? "-" : "";
+                valueLines.push(`Debt growth: **${sign}${fmtUsd(Math.abs(Number(c.debtGrowthUsd)))}**`);
+              } else if (typeof c.debtDeltaUsd === "number" && Number.isFinite(c.debtDeltaUsd)) {
+                const sign = c.debtDeltaUsd > 0 ? "+" : c.debtDeltaUsd < 0 ? "-" : "";
+                valueLines.push(`Debt growth: **${sign}${fmtUsd(Math.abs(Number(c.debtDeltaUsd)))}**`);
+              }
+            }
+          }
         } else {
           valueLines.push("Price / liquidation: *(unavailable; cannot compute LTV / buffer)*");
         }
@@ -287,7 +316,7 @@ module.exports = {
           );
         }
         if (typeof s.debtAmount === "number") {
-          valueLines.push(`Debt: **${fmtDebt.format(s.debtAmount)}**`);
+          valueLines.push(`Debt: **${fmtDebt.format(s.debtAmount)} ${s.debtSymbol || ""}**`.trim());
         }
 
         if (typeof s.interestPct === "number") {

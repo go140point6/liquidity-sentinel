@@ -13,7 +13,7 @@ const logger = baseLogger.forEnv("SCAN_DEBUG");
 const { initSchema } = require("../db");
 const { syncTransferStreams, listStreams } = require("../utils/indexer/streamRegistry");
 const { prepareEventStore } = require("../utils/indexer/eventStore");
-const { runWindowedScan } = require("../utils/indexer/windowRunner");
+const { runWindowedScan, getBlockNumberWithRetry } = require("../utils/indexer/windowRunner");
 
 function requireEnv(name) {
   const v = process.env[name];
@@ -132,7 +132,13 @@ async function main() {
         ? Math.max(streamStart, cursorLast + 1)
         : streamStart;
 
-      const latestBlock = await provider.getBlockNumber();
+      const headRes = await getBlockNumberWithRetry(provider);
+      if (!headRes.ok) {
+        throw new Error(
+          `latest block fetch failed after ${headRes.attempt} attempts: ${headRes.error?.message || headRes.error}`
+        );
+      }
+      const latestBlock = Number(headRes.blockNumber);
       const fromBlock = fromOverride != null ? fromOverride : defaultFrom;
       const toBlock = toOverride != null ? toOverride : latestBlock;
 

@@ -1,0 +1,21 @@
+{
+  "chains": {
+    "XDC": {
+      "markets": [
+        {
+          "key": "primefi_wxdc_usdc",
+          "protocol": "PRIMEFI_LOAN_WXDC_USDC",
+          "label": "PrimeFi WXDC-USDC",
+          "lendingPool": "0x8a619D8E3BfAb54F7C30Ef39Ce16c53429c739C3",
+          "dataProvider": "0x2E6bA568aaebadb4db3E018313ee34baD0328988",
+          "uiPoolDataProvider": "0x7b6218B77127367B6Df46c80F469D22845bd4B7d",
+          "collateralAsset": "0x951857744785E80e2De051c32EE7b25f9c458C42",
+          "debtAsset": "0xfA2958CB79b0491CC627c1557F441eF849Ca8eb1",
+          "collateralSymbol": "WXDC",
+          "debtSymbol": "USDC",
+          "start_block": 94700000
+        }
+      ]
+    }
+  }
+}

@@ -148,21 +148,28 @@ async function main() {
   }
 
   // Phase 1: index tail
-  logger.info("[indexPipelineCycle] stage 1/5: index tail FLR");
+  logger.info("[indexPipelineCycle] stage 1/7: index tail FLR");
   await runNodeScript("jobs/indexTail.js", ["--chain=FLR"]);
 
-  logger.info("[indexPipelineCycle] stage 2/5: index tail XDC");
+  logger.info("[indexPipelineCycle] stage 2/7: index tail XDC");
   await runNodeScript("jobs/indexTail.js", ["--chain=XDC"]);
 
   // Phase 2: derive indexed ownership
-  logger.info("[indexPipelineCycle] stage 3/5: derive NFT FLR");
+  logger.info("[indexPipelineCycle] stage 3/7: derive NFT FLR");
   await runNodeScript("jobs/deriveNftStateFromEvents.js", ["--chain=FLR"]);
 
-  logger.info("[indexPipelineCycle] stage 4/5: derive NFT XDC");
+  logger.info("[indexPipelineCycle] stage 4/7: derive NFT XDC");
   await runNodeScript("jobs/deriveNftStateFromEvents.js", ["--chain=XDC"]);
 
-  // Phase 3: refresh snapshots/alerts (with INDEXER_SKIP_DIRECT_SCAN=1 expected)
-  logger.info("[indexPipelineCycle] stage 5/5: scan + snapshot refresh");
+  // Phase 3: derive ALM share flow ledger
+  logger.info("[indexPipelineCycle] stage 5/7: derive ALM flows FLR");
+  await runNodeScript("jobs/deriveAlmFlowsFromEvents.js", ["--chain=FLR"]);
+
+  logger.info("[indexPipelineCycle] stage 6/7: derive ALM flows XDC");
+  await runNodeScript("jobs/deriveAlmFlowsFromEvents.js", ["--chain=XDC"]);
+
+  // Phase 4: refresh snapshots/alerts (with INDEXER_SKIP_DIRECT_SCAN=1 expected)
+  logger.info("[indexPipelineCycle] stage 7/7: scan + snapshot refresh");
   await runNodeScript("jobs/scanLoanLpPositions.js");
 
   const elapsed = Date.now() - runStartMs;

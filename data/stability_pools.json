@@ -1,0 +1,36 @@
+{
+  "chains": {
+    "FLR": {
+      "pools": [
+        {
+          "key": "fxrp_sp",
+          "label": "FXRP Stability Pool",
+          "branchKey": "FXRP",
+          "collSymbol": "FXRP",
+          "address": "0x2c817F7159c08d94f09764086330c96Bb3265A2f"
+        },
+        {
+          "key": "wflr_sp",
+          "label": "WFLR Stability Pool",
+          "branchKey": "WFLR",
+          "collSymbol": "WFLR",
+          "address": "0x0Dd6daab4cB9A0ba6707Cf59DBfbc28cc33CA24A"
+        },
+        {
+          "key": "stxrp_sp",
+          "label": "stXRP Stability Pool",
+          "branchKey": "STXRP",
+          "collSymbol": "stXRP",
+          "address": "0x3FAEC256DCFDB9eBa882b5F71e020FA128081f56"
+        },
+        {
+          "key": "sflr_sp",
+          "label": "sFLR Stability Pool",
+          "branchKey": "SFLR",
+          "collSymbol": "sFLR",
+          "address": "0xE6B23B97A9058B88e6d068d57d8a69Fb07ab2A61"
+        }
+      ]
+    }
+  }
+}

@@ -4,6 +4,7 @@ const { getLoanSummaries, refreshLoanSnapshots } = require("./loanMonitor");
 const { getLpSummaries, refreshLpSnapshots } = require("./lpMonitor");
 const { createDecimalFormatter } = require("../utils/intlNumberFormats");
 const { getDb } = require("../db");
+const { getSpPositionSummaries } = require("../utils/stabilityPoolPositions");
 const { acquireLock, releaseLock } = require("../utils/lock");
 const logger = require("../utils/logger");
 const { shortenTroveId } = require("../utils/ethers/shortenTroveId");
@@ -27,9 +28,10 @@ function requireNumberEnv(name) {
 
 const LOAN_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LOAN_SNAPSHOT_STALE_WARN_MIN");
 const LP_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LP_SNAPSHOT_STALE_WARN_MIN");
+const SP_POSITION_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SP_POSITION_SNAPSHOT_STALE_WARN_MIN");
 const SNAPSHOT_STALE_WARN_MS = Math.max(
   0,
-  Math.floor(Math.max(LOAN_SNAPSHOT_STALE_WARN_MIN, LP_SNAPSHOT_STALE_WARN_MIN) * 60 * 1000)
+  Math.floor(Math.max(LOAN_SNAPSHOT_STALE_WARN_MIN, LP_SNAPSHOT_STALE_WARN_MIN, SP_POSITION_SNAPSHOT_STALE_WARN_MIN) * 60 * 1000)
 );
 const DEFAULT_HEARTBEAT_TZ = process.env.HEARTBEAT_TZ || "America/Los_Angeles";
 const SNAPSHOT_LOCK_NAME = "snapshot-refresh";
@@ -87,6 +89,22 @@ function computePoolSharePct(liquidityRaw, poolLiquidityRaw) {
   }
 }
 
+function normalizeRangeStatus(status) {
+  const s = String(status || "").toUpperCase().replace(/\s+/g, "_");
+  if (s === "OUT_OF_RANGE" || s === "IN_RANGE" || s === "INACTIVE" || s === "UNKNOWN") return s;
+  return "UNKNOWN";
+}
+
+function getDisplayedPoolShare(summary) {
+  const rangeStatus = normalizeRangeStatus(summary?.rangeStatus || summary?.status);
+  if (rangeStatus === "OUT_OF_RANGE") {
+    return { pct: 0, oor: true };
+  }
+  const raw = computePoolSharePct(summary?.liquidity, summary?.poolLiquidity);
+  if (!Number.isFinite(raw)) return { pct: null, oor: false };
+  return { pct: Math.max(0, Math.min(raw, 100)), oor: false };
+}
+
 function fmtNum5(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return "n/a";
   return fmt5.format(n);
@@ -100,6 +118,12 @@ function fmtNum2(n) {
 function fmtPct2(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return "n/a";
   return `${n.toFixed(2)}%`;
+}
+
+function formatTokenAmountSigned(n) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return null;
+  const out = formatTokenAmount(n);
+  return n > 0 ? `+${out}` : out;
 }
 
 function formatTokenAmount(n) {
@@ -172,21 +196,38 @@ function loanMeaning(tier, kind, aheadPctText) {
 
 function formatLoanField(s, priceCache) {
   const rawId = s.troveId ?? s.tokenId ?? s.positionId ?? "?";
+  const idKind = s.positionLabel || "Trove";
   const troveId = shortenTroveId(rawId);
   const troveLink = formatLoanTroveLink(s.protocol, rawId, troveId);
   const title = `${s.protocol || "UNKNOWN"} (${s.chainId || "?"})`;
   const lines = [];
-  lines.push(`Trove: ${troveLink}`);
+  lines.push(`${idKind}: ${troveLink}`);
   if (s.owner) {
     const walletText = formatAddressLink(s.chainId, s.owner) || shortenAddress(s.owner);
     lines.push(`Wallet: ${walletText}`);
+    if (s.walletLabel) lines.push(`Label: **${s.walletLabel}**`);
   }
 
   const status = s.status || "UNKNOWN";
   lines.push(`Status: ${status}`);
   const debtText =
     typeof s.debtAmount === "number" && Number.isFinite(s.debtAmount) ? fmtDebt.format(s.debtAmount) : "n/a";
-  lines.push(`Debt: ${debtText}`);
+  lines.push(`Debt: ${debtText}${s.debtSymbol ? ` ${s.debtSymbol}` : ""}`);
+  if (s.kind === "PRIMEFI_ACCOUNT") {
+    if (s.carry24h) {
+      const c = s.carry24h;
+      lines.push(`24h carry: ${typeof c.netCarryUsd === "number" && Number.isFinite(c.netCarryUsd) ? fmtUsd(c.netCarryUsd) : "n/a"}`);
+      const collText = typeof c.collateralDeltaUsd === "number" && Number.isFinite(c.collateralDeltaUsd)
+        ? `${c.collateralDeltaUsd > 0 ? "+" : c.collateralDeltaUsd < 0 ? "-" : ""}${fmtUsd(Math.abs(Number(c.collateralDeltaUsd)))}`
+        : "n/a";
+      const debtText = typeof c.debtDeltaUsd === "number" && Number.isFinite(c.debtDeltaUsd)
+        ? `${c.debtDeltaUsd > 0 ? "+" : c.debtDeltaUsd < 0 ? "-" : ""}${fmtUsd(Math.abs(Number(c.debtDeltaUsd)))}`
+        : "n/a";
+      lines.push(`24h spot moves: Collateral ${collText} | Debt ${debtText}`);
+    } else {
+      lines.push(`24h carry: n/a (awaiting 24h baseline)`);
+    }
+  }
   lines.push("");
 
   if (s.hasPrice && typeof s.price === "number" && typeof s.liquidationPrice === "number") {
@@ -209,6 +250,9 @@ function formatLoanField(s, priceCache) {
         s.liquidationPrice
       )} | Buffer: ${bufferText} (${liqTier})`
     );
+    if (typeof s.healthFactor === 'number' && Number.isFinite(s.healthFactor)) {
+      lines.push(`Health factor: ${s.healthFactor.toFixed(2)}`);
+    }
     lines.push(`Meaning: ${loanMeaning(s.liquidationTier, "LIQUIDATION")}`);
     lines.push("");
   } else {
@@ -299,6 +343,7 @@ function formatLpField(s, priceCache) {
   if (s.owner) {
     const walletText = formatAddressLink(s.chainId, s.owner) || shortenAddress(s.owner);
     parts.push(`Wallet: ${walletText}`);
+    if (s.walletLabel) parts.push(`Label: **${s.walletLabel}**`);
   }
 
   const chainId = String(s.chainId || "").toUpperCase();
@@ -391,6 +436,7 @@ function formatAlmLpField(s, priceCache) {
   if (s.owner) {
     const walletText = formatAddressLink(s.chainId, s.owner) || shortenAddress(s.owner);
     parts.push(`Wallet: ${walletText}`);
+    if (s.walletLabel) parts.push(`Label: **${s.walletLabel}**`);
   }
 
   const chainId = String(s.chainId || "").toUpperCase();
@@ -414,15 +460,32 @@ function formatAlmLpField(s, priceCache) {
     priceQuote = priceBase / price;
   }
 
-  const sharePct = Number.isFinite(s.almSharePct)
+  const sharePctRaw = Number.isFinite(s.almSharePct)
     ? Number(s.almSharePct)
     : computePoolSharePct(s.liquidity, s.poolLiquidity);
+  const sharePct = Number.isFinite(sharePctRaw)
+    ? Math.max(0, Math.min(sharePctRaw, 100))
+    : null;
   if (Number.isFinite(sharePct)) {
     parts.push(`Your share: **${sharePct.toFixed(2)}%**`);
   }
 
+
   const sym0 = s.token0Symbol || "token0";
   const sym1 = s.token1Symbol || "token1";
+
+  if (
+    typeof s.vaultTotalAmount0 === "number" &&
+    Number.isFinite(s.vaultTotalAmount0) &&
+    typeof s.vaultTotalAmount1 === "number" &&
+    Number.isFinite(s.vaultTotalAmount1)
+  ) {
+    parts.push(
+      `Vault total: ${formatTokenAmount(s.vaultTotalAmount0)} ${sym0}, ` +
+        `${formatTokenAmount(s.vaultTotalAmount1)} ${sym1}`
+    );
+  }
+
   if (
     typeof s.amount0 === "number" &&
     Number.isFinite(s.amount0) &&
@@ -437,19 +500,65 @@ function formatAlmLpField(s, priceCache) {
     );
   }
 
-  if (
-    typeof s.vaultTotalAmount0 === "number" &&
-    Number.isFinite(s.vaultTotalAmount0) &&
-    typeof s.vaultTotalAmount1 === "number" &&
-    Number.isFinite(s.vaultTotalAmount1)
-  ) {
-    parts.push(
-      `Vault total: ${formatTokenAmount(s.vaultTotalAmount0)} ${sym0}, ` +
-        `${formatTokenAmount(s.vaultTotalAmount1)} ${sym1}`
-    );
-  }
+  if (s.almSinceStart) {
+    const d0Num = Number(s.almSinceStart.strategyDeltaAmount0);
+    const d1Num = Number(s.almSinceStart.strategyDeltaAmount1);
+    const cur0 = Number(s.amount0);
+    const cur1 = Number(s.amount1);
 
+    const hold0Num = Number.isFinite(cur0) && Number.isFinite(d0Num) ? cur0 - d0Num : null;
+    const hold1Num = Number.isFinite(cur1) && Number.isFinite(d1Num) ? cur1 - d1Num : null;
+    if (Number.isFinite(hold0Num) || Number.isFinite(hold1Num)) {
+      const h0Usd = Number.isFinite(hold0Num) && Number.isFinite(priceBase) ? fmtUsd(hold0Num * priceBase) : null;
+      const h1Usd = Number.isFinite(hold1Num) && Number.isFinite(priceQuote) ? fmtUsd(hold1Num * priceQuote) : null;
+      parts.push(
+        `Your token values just holding: ${Number.isFinite(hold0Num) ? `${formatTokenAmount(hold0Num)} ${sym0}${h0Usd ? ` (${h0Usd})` : ""}` : `- ${sym0}`}, ` +
+          `${Number.isFinite(hold1Num) ? `${formatTokenAmount(hold1Num)} ${sym1}${h1Usd ? ` (${h1Usd})` : ""}` : `- ${sym1}`}`
+      );
+    }
+
+    const needsBase = Number.isFinite(d0Num) && d0Num !== 0;
+    const needsQuote = Number.isFinite(d1Num) && d1Num !== 0;
+    if ((needsBase && !Number.isFinite(priceBase)) || (needsQuote && !Number.isFinite(priceQuote))) {
+      logger.warn(
+        `[dailyHeartbeat][ALM][USD_MISSING] chain=${s.chainId || "?"} protocol=${s.protocol || "UNKNOWN"} token=${s.tokenId || "?"} ` +
+        `pair=${sym0}/${sym1} price_${sym0}=${Number.isFinite(priceBase) ? priceBase : "n/a"} ` +
+        `price_${sym1}=${Number.isFinite(priceQuote) ? priceQuote : "n/a"}`
+      );
+    }
+
+    const canPriceUsd = (!needsBase || Number.isFinite(priceBase)) && (!needsQuote || Number.isFinite(priceQuote));
+    if (canPriceUsd) {
+      const usdDelta =
+        (Number.isFinite(d0Num) && Number.isFinite(priceBase) ? d0Num * priceBase : 0) +
+        (Number.isFinite(d1Num) && Number.isFinite(priceQuote) ? d1Num * priceQuote : 0);
+      if (usdDelta > 0) {
+        parts.push(`Strategy verdict: 📈 Gain of ${fmtUsd(usdDelta)} vs. just holding`);
+      } else if (usdDelta < 0) {
+        parts.push(`Strategy verdict: 📉 Loss of ${fmtUsd(Math.abs(usdDelta))} vs. just holding`);
+      } else {
+        parts.push(`Strategy verdict: ⚖️ Flat vs. just holding`);
+      }
+    } else {
+      parts.push(`Strategy verdict: ⚪ USD comparison unavailable (missing price)`);
+    }
+  }
   return { name: title, value: parts.join("\n") };
+}
+
+function formatSpField(s) {
+  const title = `${s.poolLabel || s.poolKey || "Unknown"} (${s.chainId || "?"})`;
+  const lines = [];
+  if (s.walletAddress) {
+    const walletText = formatAddressLink(s.chainId, s.walletAddress) || shortenAddress(s.walletAddress);
+    lines.push(`Wallet: ${walletText}`);
+    if (s.walletLabel) lines.push(`Label: **${s.walletLabel}**`);
+  }
+  lines.push(`Current deposit: **${fmtNum2(Number(s.compoundedDeposit))} CDP**`);
+  lines.push(`Pending CDP yield: **${fmtNum2(Number(s.yieldGain))} CDP**`);
+  lines.push(`Claimable collateral: **${fmtNum5(Number(s.claimableCollateral))} ${s.collSymbol || "COLL"}**`);
+  lines.push(`Pool share: **${fmtPct2(Number(s.poolSharePct))}**`);
+  return { name: title, value: lines.join("\n") };
 }
 
 function worstLoanTier(loans) {
@@ -495,7 +604,7 @@ function colorForLpStatus(status) {
   );
 }
 
-function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, priceCache }) {
+function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, spSummaries, client, priceCache }) {
   const embeds = [];
   const activeLoanSummaries = (loanSummaries || []).filter(
     (s) => String(s.status || "").toUpperCase() !== "CLOSED"
@@ -506,13 +615,16 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
   });
   const activeRegularLpSummaries = activeLpSummaries.filter((s) => !isAlmPosition(s));
   const activeAlmLpSummaries = activeLpSummaries.filter((s) => isAlmPosition(s));
+  const activeSpSummaries = (spSummaries || []).filter((s) => Number(s.compoundedDeposit) > 0 || Number(s.yieldGain) > 0 || Number(s.claimableCollateral) > 0);
   const loanCount = activeLoanSummaries.length;
   const lpCount = activeRegularLpSummaries.length;
   const almCount = activeAlmLpSummaries.length;
+  const spCount = activeSpSummaries.length;
 
   const snapshotTimes = []
     .concat(activeLoanSummaries)
     .concat(activeLpSummaries)
+    .concat(activeSpSummaries)
     .map((s) => parseSnapshotTs(s?.snapshotAt))
     .filter((v) => v != null);
   const latestSnapshot = snapshotTimes.length ? Math.max(...snapshotTimes) : null;
@@ -520,7 +632,7 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
     ? formatSnapshotLine(new Date(latestSnapshot * 1000).toISOString())
     : null;
 
-  const headerLines = [`Loans: **${loanCount}** | LPs: **${lpCount}** | ALMs: **${almCount}**`];
+  const headerLines = [`Loans: **${loanCount}** | LPs: **${lpCount}** | ALMs: **${almCount}** | SPs: **${spCount}**`];
   if (snapshotLine) headerLines.push("", snapshotLine);
 
   const header = new EmbedBuilder()
@@ -594,10 +706,10 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
   const poolShareTotals = new Map();
   const poolMeta = new Map();
   for (const s of activeLpSummaries) {
-    const share = computePoolSharePct(s.liquidity, s.poolLiquidity);
-    if (share == null || !Number.isFinite(share)) continue;
+    const shareInfo = getDisplayedPoolShare(s);
+    if (shareInfo.pct == null || !Number.isFinite(shareInfo.pct)) continue;
     const key = lpPoolKey(s);
-    poolShareTotals.set(key, (poolShareTotals.get(key) || 0) + share);
+    poolShareTotals.set(key, (poolShareTotals.get(key) || 0) + shareInfo.pct);
     if (!poolMeta.has(key)) {
       const pair =
         s.pairLabel ||
@@ -675,6 +787,32 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, client, pric
         .addFields(fields);
       if (idx === 0) {
         e.setDescription("_Managed vault positions shown with share and value metrics._");
+      }
+      embeds.push(e);
+    });
+  }
+
+  const spFields = activeSpSummaries
+    .slice()
+    .sort((a, b) => {
+      const av = Number(a.compoundedDeposit) || 0;
+      const bv = Number(b.compoundedDeposit) || 0;
+      if (bv !== av) return bv - av;
+      return String(a.poolLabel || "").localeCompare(String(b.poolLabel || ""));
+    })
+    .map((s) => formatSpField(s));
+
+  if (spFields.length) {
+    const baseSize = "Stability Pools".length + 200;
+    const MAX_EMBED_CHARS = 5200;
+    const chunks = chunkFieldsBySize(spFields, baseSize, MAX_EMBED_CHARS);
+    chunks.forEach((fields, idx) => {
+      const e = new EmbedBuilder()
+        .setTitle(idx === 0 ? "Stability Pools" : "Stability Pools (cont.)")
+        .setColor("DarkBlue")
+        .addFields(fields);
+      if (idx === 0) {
+        e.setDescription("_Current deposit is compounded CDP. Claimable collateral includes stashed + newly accrued collateral._");
       }
       embeds.push(e);
     });
@@ -806,6 +944,7 @@ async function sendDailyHeartbeat(client) {
   }
 
   const nowIso = new Date().toISOString();
+  const db = getDb();
 
   const userCache = new Map(); // discordId -> Discord.User
 
@@ -816,12 +955,14 @@ async function sendDailyHeartbeat(client) {
 
     const userLoans = (allLoanSummaries || []).filter((s) => String(s.userId) === userIdKey);
     const userLps = (allLpSummaries || []).filter((s) => String(s.userId) === userIdKey);
+    const userSps = getSpPositionSummaries(db, Number(r.userId));
 
-  const priceCache = loadPriceCache(getDb());
-  const embeds = buildHeartbeatEmbeds({
+    const priceCache = loadPriceCache(db);
+    const embeds = buildHeartbeatEmbeds({
       nowIso,
       loanSummaries: userLoans,
       lpSummaries: userLps,
+      spSummaries: userSps,
       client,
       priceCache,
     });

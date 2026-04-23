@@ -73,6 +73,22 @@ function computePoolSharePct(liquidityRaw, poolLiquidityRaw) {
   }
 }
 
+function normalizeRangeStatus(status) {
+  const s = String(status || "").toUpperCase().replace(/\s+/g, "_");
+  if (s === "OUT_OF_RANGE" || s === "IN_RANGE" || s === "INACTIVE" || s === "UNKNOWN") return s;
+  return "UNKNOWN";
+}
+
+function getDisplayedPoolShare(summary) {
+  const rangeStatus = normalizeRangeStatus(summary?.rangeStatus || summary?.status);
+  if (rangeStatus === "OUT_OF_RANGE") {
+    return { pct: 0, oor: true };
+  }
+  const raw = computePoolSharePct(summary?.liquidity, summary?.poolLiquidity);
+  if (!Number.isFinite(raw)) return { pct: null, oor: false };
+  return { pct: Math.max(0, Math.min(raw, 100)), oor: false };
+}
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("my-lp")
@@ -234,6 +250,7 @@ module.exports = {
         if (s.owner) {
           const walletText = formatAddressLink(s.chainId, s.owner) || `**${shortenAddress(s.owner)}**`;
           valueLines.push(`Wallet: ${walletText}`);
+          if (s.walletLabel) valueLines.push(`Label: **${s.walletLabel}**`);
         }
 
         // ---- NEW: principal amounts
@@ -268,9 +285,10 @@ module.exports = {
           valueLines.push(`Uncollected fees: ${p.join(" + ")}`);
         }
 
-        const poolSharePct = computePoolSharePct(s.liquidity, s.poolLiquidity);
-        if (poolSharePct != null) {
-          valueLines.push(`Pool share: **${poolSharePct.toFixed(2)}%**`);
+        const poolShare = getDisplayedPoolShare(s);
+        if (poolShare.pct != null) {
+          if (poolShare.oor) valueLines.push("Pool share: **0.00% (OOR)**");
+          else valueLines.push(`Pool share: **${poolShare.pct.toFixed(2)}%**`);
         }
 
         if (typeof s.lpPositionFrac === "number") {
@@ -317,13 +335,27 @@ module.exports = {
         if (s.owner) {
           const walletText = formatAddressLink(s.chainId, s.owner) || `**${shortenAddress(s.owner)}**`;
           valueLines.push(`Wallet: ${walletText}`);
+          if (s.walletLabel) valueLines.push(`Label: **${s.walletLabel}**`);
         }
 
-        const sharePct = Number.isFinite(s.almSharePct)
+        const sharePctRaw = Number.isFinite(s.almSharePct)
           ? Number(s.almSharePct)
           : computePoolSharePct(s.liquidity, s.poolLiquidity);
+        const sharePct = Number.isFinite(sharePctRaw)
+          ? Math.max(0, Math.min(sharePctRaw, 100))
+          : null;
         if (Number.isFinite(sharePct)) {
           valueLines.push(`Your share: **${sharePct.toFixed(2)}%**`);
+        }
+
+
+        const vt0 = fmtNum(s.vaultTotalAmount0);
+        const vt1 = fmtNum(s.vaultTotalAmount1);
+        if (vt0 != null || vt1 != null) {
+          const p = [];
+          if (vt0 != null) p.push(`**${vt0} ${sym0}**`);
+          if (vt1 != null) p.push(`**${vt1} ${sym1}**`);
+          valueLines.push(`Vault total: ${p.join(" + ")}`);
         }
 
         const a0 = fmtNum(s.amount0);
@@ -343,15 +375,55 @@ module.exports = {
           valueLines.push(`Your vault share value: ${p.join(" + ")}`);
         }
 
-        const vt0 = fmtNum(s.vaultTotalAmount0);
-        const vt1 = fmtNum(s.vaultTotalAmount1);
-        if (vt0 != null || vt1 != null) {
-          const p = [];
-          if (vt0 != null) p.push(`**${vt0} ${sym0}**`);
-          if (vt1 != null) p.push(`**${vt1} ${sym1}**`);
-          valueLines.push(`Vault total: ${p.join(" + ")}`);
-        }
+        if (s.almSinceStart) {
+          const d0Num = Number(s.almSinceStart.strategyDeltaAmount0);
+          const d1Num = Number(s.almSinceStart.strategyDeltaAmount1);
+          const cur0 = Number(s.amount0);
+          const cur1 = Number(s.amount1);
 
+          const hold0Num = Number.isFinite(cur0) && Number.isFinite(d0Num) ? cur0 - d0Num : null;
+          const hold1Num = Number.isFinite(cur1) && Number.isFinite(d1Num) ? cur1 - d1Num : null;
+          const h0 = fmtNum(hold0Num);
+          const h1 = fmtNum(hold1Num);
+          if (h0 != null || h1 != null) {
+            const hp = [];
+            if (h0 != null) {
+              const h0Usd = Number.isFinite(hold0Num) && Number.isFinite(priceBase) ? fmtUsd(hold0Num * priceBase) : null;
+              hp.push(`**${h0} ${sym0}**${h0Usd ? ` (${h0Usd})` : ""}`);
+            }
+            if (h1 != null) {
+              const h1Usd = Number.isFinite(hold1Num) && Number.isFinite(priceQuote) ? fmtUsd(hold1Num * priceQuote) : null;
+              hp.push(`**${h1} ${sym1}**${h1Usd ? ` (${h1Usd})` : ""}`);
+            }
+            valueLines.push(`Your token values just holding: ${hp.join(" + ")}`);
+          }
+
+          const needsBase = Number.isFinite(d0Num) && d0Num !== 0;
+          const needsQuote = Number.isFinite(d1Num) && d1Num !== 0;
+          if ((needsBase && !Number.isFinite(priceBase)) || (needsQuote && !Number.isFinite(priceQuote))) {
+            logger.warn(
+              `[my-lp][ALM][USD_MISSING] chain=${s.chainId || "?"} protocol=${s.protocol || "UNKNOWN"} token=${s.tokenId || "?"} ` +
+              `pair=${sym0}/${sym1} price_${sym0}=${Number.isFinite(priceBase) ? priceBase : "n/a"} ` +
+              `price_${sym1}=${Number.isFinite(priceQuote) ? priceQuote : "n/a"}`
+            );
+          }
+
+          const canPriceUsd = (!needsBase || Number.isFinite(priceBase)) && (!needsQuote || Number.isFinite(priceQuote));
+          if (canPriceUsd) {
+            const usdDelta =
+              (Number.isFinite(d0Num) && Number.isFinite(priceBase) ? d0Num * priceBase : 0) +
+              (Number.isFinite(d1Num) && Number.isFinite(priceQuote) ? d1Num * priceQuote : 0);
+            if (usdDelta > 0) {
+              valueLines.push(`Strategy verdict: 📈 Gain of **${fmtUsd(usdDelta)}** vs. just holding`);
+            } else if (usdDelta < 0) {
+              valueLines.push(`Strategy verdict: 📉 Loss of **${fmtUsd(Math.abs(usdDelta))}** vs. just holding`);
+            } else {
+              valueLines.push(`Strategy verdict: ⚖️ Flat vs. just holding`);
+            }
+          } else {
+            valueLines.push(`Strategy verdict: ⚪ USD comparison unavailable (missing price)`);
+          }
+        }
         let value = valueLines.join("\n");
         if (value.length > 1024) value = value.slice(0, 1020) + "…";
         return { name: header, value };

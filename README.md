@@ -20,7 +20,7 @@ Loan/trove health, liquidation buffers, and redemption risk across supported cha
 
 ### /my-lp
 Uniswap v3 LP positions with range status, estimated amounts from liquidity, and fee/position context.
-Also includes ALM vault positions (when present) with share/value metrics in a separate ALM subsection.
+Also includes ALM vault positions (when present) with share/value metrics, a just-holding comparison, and a strategy verdict in a separate ALM subsection.
 
 <img src="img/my-lp.png" alt="/my-lp screenshot" width="720">
 
@@ -57,7 +57,7 @@ Stateful alerting for liquidation/redemption thresholds and position risk change
 ### Daily heartbeat DM
 A daily summary DM with tracked positions, current status, and key liquidity/health signals.
 Includes a total LP pool-share summary by DEX/pair across your tracked wallets.
-When ALM positions exist, they are shown in a separate ALM section and counted separately in the heartbeat header.
+When ALM positions exist, they are shown in a separate ALM section and counted separately in the heartbeat header, including the same just-holding strategy verdict view.
 Delivery time is user-configurable from `/my-wallets` (hour + timezone).
 
 <img src="img/daily-heartbeat.png" alt="Daily heartbeat screenshot" width="720">
@@ -70,6 +70,7 @@ Delivery time is user-configurable from `/my-wallets` (hour + timezone).
 - Multi-chain RPC support with strict environment validation.
 - Lightweight custom logger for consistent, controllable output.
 - Optional Firelight vault-capacity signal channel with reaction-based DM subscription.
+- Optional Stability Pool APR board channel (24h realized/annualized) with leader-flip DM subscriptions.
 
 ---
 

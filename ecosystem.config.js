@@ -6,7 +6,7 @@ module.exports = {
       interpreter: "node",
       //node_args: "--trace-deprecation",
       autorestart: false,
-      cron_restart: "*/10 * * * *",
+      cron_restart: "0,8,16,24,32,40,48,56 * * * *",
       time: true,
       env: {
         NODE_ENV: "production",
@@ -17,6 +17,7 @@ module.exports = {
       script: "jobs/scanLoanLpPositions.js",
       interpreter: "node",
       autorestart: false,
+      cron_restart: "2,10,18,26,34,42,50,58 * * * *",
       time: true,
       env: {
         NODE_ENV: "production",
@@ -37,6 +38,39 @@ module.exports = {
       script: "jobs/deriveNftStateFromEvents.js",
       interpreter: "node",
       autorestart: false,
+      time: true,
+      env: {
+        NODE_ENV: "production",
+      },
+    },
+    {
+      name: "sp-snapshot-hourly",
+      script: "jobs/collectStabilityPoolSnapshots.js",
+      interpreter: "node",
+      autorestart: false,
+      cron_restart: "6 * * * *",
+      time: true,
+      env: {
+        NODE_ENV: "production",
+      },
+    },
+    {
+      name: "sp-position-scan",
+      script: "jobs/scanStabilityPoolPositions.js",
+      interpreter: "node",
+      autorestart: false,
+      cron_restart: "5,15,25,35,45,55 * * * *",
+      time: true,
+      env: {
+        NODE_ENV: "production",
+      },
+    },
+    {
+      name: "primefi-market-tail",
+      script: "jobs/scanPrimefiMarketEvents.js",
+      interpreter: "node",
+      autorestart: false,
+      cron_restart: "6,36 * * * *",
       time: true,
       env: {
         NODE_ENV: "production",
