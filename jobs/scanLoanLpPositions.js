@@ -72,7 +72,6 @@ const FORCE_REFRESH_KEYS = {
   LP: "SCAN_FORCE_REFRESH_LP",
   REDEMP: "SCAN_FORCE_REFRESH_REDEMP",
 };
-const CURSOR_CHECKPOINT_EVERY_WINDOWS = 25;
 
 function requirePositiveInt(name, n) {
   if (!Number.isInteger(n) || n <= 0) {
@@ -368,12 +367,6 @@ function updateCursor(db, contractId, lastBlock) {
   `).run(lastBlock, contractId);
 }
 
-function shouldCheckpointWindow(windowIndex) {
-  return Number.isInteger(windowIndex) &&
-    windowIndex > 0 &&
-    windowIndex % CURSOR_CHECKPOINT_EVERY_WINDOWS === 0;
-}
-
 function getGlobalParam(db, chainId, paramKey) {
   const row = db
     .prepare(
@@ -558,10 +551,6 @@ async function discoverAlmVaultsForSource(db, provider, src) {
     }
 
     lastGoodBlock = toBlock;
-    if (shouldCheckpointWindow(windowIndex)) {
-      upsertGlobalParam(db, chainId, cursorKey, String(lastGoodBlock), "alm-discovery");
-      vlog(`        checkpoint cursor=${lastGoodBlock} after window ${windowIndex}/${totalWindows}`);
-    }
     if (pauseMs > 0) {
       vlog(`        pause ${pauseMs}ms`);
       await sleep(pauseMs);
@@ -1230,10 +1219,6 @@ async function scanContract(db, provider, c) {
     }
 
     lastGoodBlock = toBlock;
-    if (shouldCheckpointWindow(windowIndex)) {
-      updateCursor(db, c.contract_id, lastGoodBlock);
-      vlog(`        checkpoint cursor=${lastGoodBlock} after window ${windowIndex}/${totalWindows}`);
-    }
 
     if (pauseMs > 0) {
       vlog(`        pause ${pauseMs}ms`);

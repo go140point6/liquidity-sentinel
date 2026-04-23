@@ -15,25 +15,6 @@ function isRateLimitError(err) {
   return msg.includes("rate limit") || msg.includes("too many requests") || msg.includes("-32090");
 }
 
-function isTransientNetworkError(err) {
-  const msg = String(err?.message || "").toLowerCase();
-  const code = String(err?.code || "").toUpperCase();
-  return (
-    msg.includes("socket hang up") ||
-    msg.includes("econnreset") ||
-    msg.includes("etimedout") ||
-    msg.includes("timeout") ||
-    msg.includes("timed out") ||
-    msg.includes("connection reset by peer") ||
-    msg.includes("network error") ||
-    msg.includes("missing response") ||
-    code === "ECONNRESET" ||
-    code === "ETIMEDOUT" ||
-    code === "EPIPE" ||
-    code === "ECONNABORTED"
-  );
-}
-
 async function getLogsWithRetry(provider, filter, { maxAttempts = 6, baseBackoffMs = 750 } = {}) {
   let attempt = 0;
   let backoffMs = baseBackoffMs;
@@ -45,32 +26,7 @@ async function getLogsWithRetry(provider, filter, { maxAttempts = 6, baseBackoff
       return { ok: true, logs, attempt };
     } catch (err) {
       const retryAfterMs = parseRetryAfterMs(err);
-      const shouldRetry = isRateLimitError(err) || isTransientNetworkError(err) || retryAfterMs != null;
-
-      if (!shouldRetry || attempt >= maxAttempts) {
-        return { ok: false, error: err, attempt };
-      }
-
-      await sleep(retryAfterMs ?? backoffMs);
-      backoffMs = Math.min(backoffMs * 2, 10000);
-    }
-  }
-
-  return { ok: false, error: new Error("exhausted retries"), attempt: maxAttempts };
-}
-
-async function getBlockWithRetry(provider, blockTag, { maxAttempts = 6, baseBackoffMs = 750 } = {}) {
-  let attempt = 0;
-  let backoffMs = baseBackoffMs;
-
-  while (attempt < maxAttempts) {
-    attempt += 1;
-    try {
-      const block = await provider.getBlock(blockTag);
-      return { ok: true, block, attempt };
-    } catch (err) {
-      const retryAfterMs = parseRetryAfterMs(err);
-      const shouldRetry = isRateLimitError(err) || isTransientNetworkError(err) || retryAfterMs != null;
+      const shouldRetry = isRateLimitError(err) || retryAfterMs != null;
 
       if (!shouldRetry || attempt >= maxAttempts) {
         return { ok: false, error: err, attempt };
@@ -169,6 +125,6 @@ async function runWindowedScan({
 module.exports = {
   sleep,
   getLogsWithRetry,
-  getBlockWithRetry,
+  getBlockNumberWithRetry,
   runWindowedScan,
 };
