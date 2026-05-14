@@ -4,6 +4,7 @@ const { getDb } = require("../db");
 const logger = require("../utils/logger");
 const { getProviderForChain } = require("../utils/ethers/providers");
 const { loadPriceCache, isStableUsd, normalizeSymbol } = require("../utils/priceCache");
+const { handlePrimefiWithdrawAlert } = require("./alertEngine");
 
 function requireNumberEnv(name) {
   const raw = process.env[name];
@@ -29,6 +30,11 @@ const lendingPoolAbi = [
 const dataProviderAbi = [
   "function getUserReserveData(address asset,address user) view returns (uint256 currentATokenBalance,uint256 currentStableDebt,uint256 currentVariableDebt,uint256 principalStableDebt,uint256 scaledVariableDebt,uint256 stableBorrowRate,uint256 liquidityRate,uint40 stableRateLastUpdated,bool usageAsCollateralEnabled)",
   "function getReserveConfigurationData(address asset) view returns (uint256 decimals,uint256 ltv,uint256 liquidationThreshold,uint256 liquidationBonus,bool usageAsCollateralEnabled,bool borrowingEnabled,bool stableBorrowRateEnabled,bool isActive,bool isFrozen)",
+  "function getReserveTokensAddresses(address asset) view returns (address aTokenAddress,address stableDebtTokenAddress,address variableDebtTokenAddress)",
+];
+
+const erc20BalanceAbi = [
+  "function balanceOf(address account) view returns (uint256)",
 ];
 
 function classifyLiquidationRisk(bufferFrac) {
@@ -74,6 +80,21 @@ function parseSnapshotTs(raw) {
   const iso = String(raw).includes("T") ? String(raw) : String(raw).replace(" ", "T");
   const ms = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
   return Number.isFinite(ms) ? ms : null;
+}
+
+function classifyWithdrawConstraint(byRisk, reserveAvailable, withdrawableNow) {
+  if (![byRisk, reserveAvailable, withdrawableNow].every((v) => typeof v === "number" && Number.isFinite(v))) {
+    return "UNKNOWN";
+  }
+  if (withdrawableNow <= 0) {
+    if (reserveAvailable <= 0) return "LIQUIDITY";
+    if (byRisk <= 0) return "RISK";
+    return "UNKNOWN";
+  }
+  const eps = Math.max(1e-9, withdrawableNow * 1e-6);
+  const diff = byRisk - reserveAvailable;
+  if (Math.abs(diff) <= eps) return "BALANCED";
+  return diff < 0 ? "RISK" : "LIQUIDITY";
 }
 
 function deriveOriginBaselineFromEvents(db, summary) {
@@ -245,6 +266,7 @@ async function refreshPrimefiLoanSnapshots(runId) {
         const totalCollateralBase = Number(accountData.totalCollateralETH);
         const totalDebtBase = Number(accountData.totalDebtETH);
         const liqThresholdFrac = Number(collateralCfg.liquidationThreshold) / 10000;
+        const currentLiqThresholdFrac = Number(accountData.currentLiquidationThreshold) / 10000;
         const liqThresholdPct = liqThresholdFrac * 100;
         let debtAssetPrice = getPriceForSymbol(priceMap, wallet.chainId, market.debtSymbol);
         if (!Number.isFinite(debtAssetPrice) && String(market.debtSymbol).toUpperCase() === "USDC") debtAssetPrice = 1;
@@ -271,6 +293,57 @@ async function refreshPrimefiLoanSnapshots(runId) {
           : null;
         const liqClass = classifyLiquidationRisk(liquidationBufferFrac);
         const healthFactor = Number(ethers.formatUnits(accountData.healthFactor, 18));
+        let reserveAvailableAmount = null;
+        let aTokenAddress = null;
+        try {
+          const reserveTokens = await dataProvider.getReserveTokensAddresses(market.collateralAsset);
+          aTokenAddress = reserveTokens?.aTokenAddress ? ethers.getAddress(reserveTokens.aTokenAddress) : null;
+          if (aTokenAddress) {
+            const collToken = new ethers.Contract(market.collateralAsset, erc20BalanceAbi, provider);
+            const reserveAvailableRaw = await collToken.balanceOf(aTokenAddress);
+            reserveAvailableAmount = toNumUnits(reserveAvailableRaw, collDecimals);
+          }
+        } catch (e) {
+          logger.warn(
+            `[primefiLoanMonitor] reserve liquidity read failed wallet=${wallet.addressEip55} protocol=${market.protocol}: ${e?.message || e}`
+          );
+        }
+        let withdrawableByRiskAmount = null;
+        if (Number(collAmount) > 0) {
+          if (!(Number(debtAmount) > 0)) {
+            withdrawableByRiskAmount = collAmount;
+          } else if (
+            Number.isFinite(totalCollateralBase) &&
+            totalCollateralBase > 0 &&
+            Number.isFinite(totalDebtBase) &&
+            totalDebtBase >= 0 &&
+            Number.isFinite(currentLiqThresholdFrac) &&
+            currentLiqThresholdFrac > 0
+          ) {
+            const collateralBasePerUnit = totalCollateralBase / collAmount;
+            const requiredCollateralBase = totalDebtBase / currentLiqThresholdFrac;
+            const removableCollateralBase = Math.max(0, totalCollateralBase - requiredCollateralBase);
+            if (Number.isFinite(collateralBasePerUnit) && collateralBasePerUnit > 0) {
+              withdrawableByRiskAmount = Math.min(
+                collAmount,
+                Math.max(0, removableCollateralBase / collateralBasePerUnit)
+              );
+            }
+          }
+        }
+        const withdrawableNowAmount =
+          Number.isFinite(withdrawableByRiskAmount) && Number.isFinite(reserveAvailableAmount)
+            ? Math.max(0, Math.min(withdrawableByRiskAmount, reserveAvailableAmount))
+            : null;
+        const withdrawableConstraint = classifyWithdrawConstraint(
+          withdrawableByRiskAmount,
+          reserveAvailableAmount,
+          withdrawableNowAmount
+        );
+        const withdrawableNowUsd =
+          Number.isFinite(withdrawableNowAmount) && Number.isFinite(collateralPrice)
+            ? withdrawableNowAmount * collateralPrice
+            : null;
 
         const summary = {
           kind: "PRIMEFI_ACCOUNT",
@@ -302,6 +375,12 @@ async function refreshPrimefiLoanSnapshots(runId) {
           interestPct: null,
           globalIrPct: null,
           priceBasis: "primefi-account-data",
+          withdrawableByRiskAmount,
+          reserveAvailableAmount,
+          withdrawableNowAmount,
+          withdrawableNowUsd,
+          withdrawableConstraint,
+          aTokenAddress,
         };
 
         const snapshotJson = JSON.stringify(summary);
@@ -322,6 +401,23 @@ async function refreshPrimefiLoanSnapshots(runId) {
           protocol: market.protocol,
           market_key: market.key,
           snapshot_json: snapshotJson,
+        });
+        await handlePrimefiWithdrawAlert({
+          userId: wallet.userId,
+          walletId: wallet.walletId,
+          chainId: wallet.chainId,
+          protocol: market.protocol,
+          marketKey: market.key,
+          walletAddress: wallet.addressEip55,
+          walletLabel: wallet.walletLabel || null,
+          collateralSymbol: market.collateralSymbol,
+          withdrawableNowAmount,
+          withdrawableNowUsd,
+          withdrawableByRiskAmount,
+          reserveAvailableAmount,
+          withdrawableConstraint,
+          snapshotAt: new Date().toISOString(),
+          snapshotSource: "rpc",
         });
         inserted.push(summary);
       } catch (err) {
