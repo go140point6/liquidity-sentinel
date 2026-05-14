@@ -299,6 +299,29 @@ module.exports = {
               }
             }
           }
+          if (typeof s.withdrawableNowAmount === "number" && Number.isFinite(s.withdrawableNowAmount)) {
+            const usdText =
+              typeof s.withdrawableNowUsd === "number" && Number.isFinite(s.withdrawableNowUsd)
+                ? ` (${fmtUsd(s.withdrawableNowUsd)})`
+                : "";
+            const limitText =
+              s.withdrawableConstraint === "LIQUIDITY"
+                ? "liquidity-limited"
+                : s.withdrawableConstraint === "RISK"
+                ? "risk-limited"
+                : s.withdrawableConstraint === "BALANCED"
+                ? "balanced"
+                : "limit unknown";
+            valueLines.push(
+              `Withdrawable now: **${fmt2.format(s.withdrawableNowAmount)} ${s.collSymbol || ""}**${usdText} (**${limitText}**)`.trim()
+            );
+            if (typeof s.withdrawableByRiskAmount === "number" && Number.isFinite(s.withdrawableByRiskAmount)) {
+              valueLines.push(`Max by risk: **${fmt2.format(s.withdrawableByRiskAmount)} ${s.collSymbol || ""}**`.trim());
+            }
+            if (typeof s.reserveAvailableAmount === "number" && Number.isFinite(s.reserveAvailableAmount)) {
+              valueLines.push(`Reserve available: **${fmt2.format(s.reserveAvailableAmount)} ${s.collSymbol || ""}**`.trim());
+            }
+          }
         } else {
           valueLines.push("Price / liquidation: *(unavailable; cannot compute LTV / buffer)*");
         }

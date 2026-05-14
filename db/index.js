@@ -572,6 +572,49 @@ function initSchema(db) {
   );
 
   CREATE INDEX IF NOT EXISTS idx_primefi_loan_history_lookup ON primefi_loan_position_snapshot_history(user_id, wallet_id, chain_id, protocol, market_key, snapshot_at);
+  CREATE TABLE IF NOT EXISTS primefi_withdraw_alert_state (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER NOT NULL,
+    wallet_id     INTEGER NOT NULL,
+    chain_id      TEXT NOT NULL,
+    protocol      TEXT NOT NULL,
+    market_key    TEXT NOT NULL,
+    alert_type    TEXT NOT NULL,
+    is_active     INTEGER NOT NULL DEFAULT 0 CHECK (is_active IN (0,1)),
+    signature     TEXT,
+    state_json    TEXT,
+    last_seen_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (wallet_id) REFERENCES user_wallets(id) ON DELETE CASCADE,
+    FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE RESTRICT,
+    UNIQUE (user_id, wallet_id, chain_id, protocol, market_key, alert_type)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_primefi_withdraw_alert_state_user
+    ON primefi_withdraw_alert_state(user_id, is_active);
+
+  CREATE TABLE IF NOT EXISTS primefi_withdraw_alert_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER NOT NULL,
+    wallet_id     INTEGER NOT NULL,
+    chain_id      TEXT NOT NULL,
+    protocol      TEXT NOT NULL,
+    market_key    TEXT NOT NULL,
+    alert_type    TEXT NOT NULL,
+    phase         TEXT NOT NULL,
+    message       TEXT NOT NULL,
+    meta_json     TEXT,
+    signature     TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (wallet_id) REFERENCES user_wallets(id) ON DELETE CASCADE,
+    FOREIGN KEY (chain_id) REFERENCES chains(id) ON DELETE RESTRICT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_primefi_withdraw_alert_log_user
+    ON primefi_withdraw_alert_log(user_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_lp_snapshots_user           ON lp_position_snapshots(user_id);
   CREATE INDEX IF NOT EXISTS idx_index_streams_chain_enabled ON index_streams(chain_id, is_enabled);
   CREATE INDEX IF NOT EXISTS idx_index_streams_contract_event ON index_streams(contract_id, event_name);

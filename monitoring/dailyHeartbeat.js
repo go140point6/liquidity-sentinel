@@ -213,6 +213,19 @@ function formatLoanField(s, priceCache) {
   const debtText =
     typeof s.debtAmount === "number" && Number.isFinite(s.debtAmount) ? fmtDebt.format(s.debtAmount) : "n/a";
   lines.push(`Debt: ${debtText}${s.debtSymbol ? ` ${s.debtSymbol}` : ""}`);
+  if (s.kind === "PRIMEFI_ACCOUNT" && typeof s.withdrawableNowAmount === "number" && Number.isFinite(s.withdrawableNowAmount)) {
+    const limitText =
+      s.withdrawableConstraint === "LIQUIDITY"
+        ? "liquidity-limited"
+        : s.withdrawableConstraint === "RISK"
+        ? "risk-limited"
+        : s.withdrawableConstraint === "BALANCED"
+        ? "balanced"
+        : "limit unknown";
+    lines.push(
+      `Withdrawable now: ${fmtDebt.format(s.withdrawableNowAmount)}${s.collSymbol ? ` ${s.collSymbol}` : ""} (${limitText})`
+    );
+  }
   if (s.kind === "PRIMEFI_ACCOUNT") {
     if (s.carry24h) {
       const c = s.carry24h;

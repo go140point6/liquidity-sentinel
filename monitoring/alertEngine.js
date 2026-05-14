@@ -123,6 +123,13 @@ const LP_SNAPSHOT_STALE_WARN_MS = Math.max(
   0,
   Math.floor(LP_SNAPSHOT_STALE_WARN_MIN * 60 * 1000)
 );
+const PRIMEFI_WITHDRAW_ALERT_TRIGGER_UNITS = requireNumberEnv("PRIMEFI_WITHDRAW_ALERT_TRIGGER_UNITS");
+const PRIMEFI_WITHDRAW_ALERT_RESET_UNITS = requireNumberEnv("PRIMEFI_WITHDRAW_ALERT_RESET_UNITS");
+if (PRIMEFI_WITHDRAW_ALERT_RESET_UNITS > PRIMEFI_WITHDRAW_ALERT_TRIGGER_UNITS) {
+  throw new Error(
+    "[alertEngine] PRIMEFI_WITHDRAW_ALERT_RESET_UNITS must be <= PRIMEFI_WITHDRAW_ALERT_TRIGGER_UNITS"
+  );
+}
 
 // -----------------------------
 // LP debounce/cooldown config (STRICT)
@@ -453,6 +460,78 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
       return;
     }
 
+    if (alertType === "PRIMEFI_WITHDRAW") {
+      if (phase !== "NEW") return;
+      const fmtAmt = (v) =>
+        typeof v === "number" && Number.isFinite(v)
+          ? new Intl.NumberFormat("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(v)
+          : "n/a";
+      const fmtUsdValue = (v) =>
+        typeof v === "number" && Number.isFinite(v)
+          ? new Intl.NumberFormat("en-US", {
+              style: "currency",
+              currency: "USD",
+              minimumFractionDigits: 0,
+              maximumFractionDigits: 2,
+            }).format(v)
+          : "n/a";
+      const limitText =
+        meta?.withdrawableConstraint === "LIQUIDITY"
+          ? "liquidity-limited"
+          : meta?.withdrawableConstraint === "RISK"
+          ? "risk-limited"
+          : meta?.withdrawableConstraint === "BALANCED"
+          ? "balanced"
+          : "limit unknown";
+
+      const embed = new EmbedBuilder()
+        .setTitle("PrimeFi Availability Alert")
+        .setDescription(`${meta?.protocol || "PRIMEFI_LOAN"} (${meta?.chainId || "?"})`)
+        .setColor("Blue")
+        .setTimestamp();
+      if (client.user) embed.setThumbnail(client.user.displayAvatarURL());
+
+      const walletText = meta?.walletAddress
+        ? formatAddressLink(meta.chainId, meta.walletAddress)
+        : meta?.wallet || "n/a";
+
+      const fields = [
+        {
+          name: "Withdrawable now",
+          value: `${fmtAmt(meta?.withdrawableNowAmount)} ${meta?.collateralSymbol || ""}`.trim(),
+          inline: true,
+        },
+        { name: "USD value", value: fmtUsdValue(meta?.withdrawableNowUsd), inline: true },
+        { name: "Limit", value: limitText, inline: true },
+        { name: "Wallet", value: walletText, inline: true },
+      ];
+      if (meta?.walletLabel) fields.push({ name: "Label", value: meta.walletLabel, inline: true });
+      if (typeof meta?.withdrawableByRiskAmount === "number" && Number.isFinite(meta.withdrawableByRiskAmount)) {
+        fields.push({
+          name: "Max by risk",
+          value: `${fmtAmt(meta.withdrawableByRiskAmount)} ${meta?.collateralSymbol || ""}`.trim(),
+          inline: true,
+        });
+      }
+      if (typeof meta?.reserveAvailableAmount === "number" && Number.isFinite(meta.reserveAvailableAmount)) {
+        fields.push({
+          name: "Reserve available",
+          value: `${fmtAmt(meta.reserveAvailableAmount)} ${meta?.collateralSymbol || ""}`.trim(),
+          inline: true,
+        });
+      }
+      const snapshotLine = formatSnapshotLine(
+        meta?.snapshotAt,
+        meta?.snapshotSource,
+        LOAN_SNAPSHOT_STALE_WARN_MS
+      );
+      if (snapshotLine) fields.push({ name: "Data captured", value: snapshotLine, inline: false });
+      embed.addFields(fields);
+
+      await user.send({ embeds: [embed] });
+      return;
+    }
+
     if (alertType === "LP_RANGE") {
       const prevTier = meta?.prevTier || "UNKNOWN";
       const newTier = meta?.newTier || "UNKNOWN";
@@ -741,6 +820,106 @@ function insertAlertLog({
     walletId,
     contractId,
     tokenId,
+    alertType,
+    phase,
+    message,
+    metaJson,
+    signature: signature ?? null,
+  });
+}
+
+function getPrevPrimefiWithdrawState({ userId, walletId, chainId, protocol, marketKey, alertType }) {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `
+      SELECT is_active AS isActive, signature, state_json AS stateJson
+      FROM primefi_withdraw_alert_state
+      WHERE user_id = ?
+        AND wallet_id = ?
+        AND chain_id = ?
+        AND protocol = ?
+        AND market_key = ?
+        AND alert_type = ?
+      LIMIT 1
+    `
+    )
+    .get(userId, walletId, String(chainId || "").toUpperCase(), protocol, marketKey, alertType);
+  if (!row) return { isActive: 0, signature: null, stateJson: null, exists: false };
+  return { ...row, exists: true };
+}
+
+function upsertPrimefiWithdrawState({
+  userId,
+  walletId,
+  chainId,
+  protocol,
+  marketKey,
+  alertType,
+  isActive,
+  signature,
+  stateJson,
+}) {
+  const db = getDb();
+  db.prepare(
+    `
+    INSERT INTO primefi_withdraw_alert_state (
+      user_id, wallet_id, chain_id, protocol, market_key, alert_type,
+      is_active, signature, state_json, last_seen_at, created_at, updated_at
+    ) VALUES (
+      @userId, @walletId, @chainId, @protocol, @marketKey, @alertType,
+      @isActive, @signature, @stateJson, datetime('now'), datetime('now'), datetime('now')
+    )
+    ON CONFLICT(user_id, wallet_id, chain_id, protocol, market_key, alert_type) DO UPDATE SET
+      is_active = excluded.is_active,
+      signature = excluded.signature,
+      state_json = excluded.state_json,
+      last_seen_at = datetime('now'),
+      updated_at = datetime('now')
+  `
+  ).run({
+    userId,
+    walletId,
+    chainId: String(chainId || "").toUpperCase(),
+    protocol,
+    marketKey,
+    alertType,
+    isActive: isActive ? 1 : 0,
+    signature: signature ?? null,
+    stateJson: stateJson ?? null,
+  });
+}
+
+function insertPrimefiWithdrawLog({
+  userId,
+  walletId,
+  chainId,
+  protocol,
+  marketKey,
+  alertType,
+  phase,
+  message,
+  meta,
+  signature,
+}) {
+  const db = getDb();
+  const metaJson = meta && Object.keys(meta).length ? JSON.stringify(meta) : null;
+  db.prepare(
+    `
+    INSERT INTO primefi_withdraw_alert_log (
+      user_id, wallet_id, chain_id, protocol, market_key,
+      alert_type, phase, message, meta_json, signature, created_at
+    ) VALUES (
+      @userId, @walletId, @chainId, @protocol, @marketKey,
+      @alertType, @phase, @message, @metaJson, @signature, datetime('now')
+    )
+  `
+  ).run({
+    userId,
+    walletId,
+    chainId: String(chainId || "").toUpperCase(),
+    protocol,
+    marketKey,
     alertType,
     phase,
     message,
@@ -2067,9 +2246,151 @@ async function handleLpRangeAlert(data) {
   });
 }
 
+async function handlePrimefiWithdrawAlert(data) {
+  const {
+    userId,
+    walletId,
+    chainId,
+    protocol,
+    marketKey,
+    walletAddress,
+    walletLabel,
+    collateralSymbol,
+    withdrawableNowAmount,
+    withdrawableNowUsd,
+    withdrawableByRiskAmount,
+    reserveAvailableAmount,
+    withdrawableConstraint,
+    snapshotAt,
+    snapshotSource,
+  } = data || {};
+
+  const alertType = "PRIMEFI_WITHDRAW";
+  const logPrefix = "[PRIMEFI][withdraw]";
+  const amount =
+    typeof withdrawableNowAmount === "number" && Number.isFinite(withdrawableNowAmount)
+      ? withdrawableNowAmount
+      : null;
+
+  const prev = getPrevPrimefiWithdrawState({
+    userId,
+    walletId,
+    chainId,
+    protocol,
+    marketKey,
+    alertType,
+  });
+  const prevActive = prev.isActive === 1;
+  const isActive =
+    amount == null
+      ? false
+      : prevActive
+      ? amount >= PRIMEFI_WITHDRAW_ALERT_RESET_UNITS
+      : amount >= PRIMEFI_WITHDRAW_ALERT_TRIGGER_UNITS;
+
+  const state = {
+    kind: "PRIMEFI_WITHDRAW",
+    chainId,
+    protocol,
+    marketKey,
+    walletAddress,
+    walletLabel,
+    collateralSymbol,
+    withdrawableNowAmount,
+    withdrawableNowUsd,
+    withdrawableByRiskAmount,
+    reserveAvailableAmount,
+    withdrawableConstraint,
+    snapshotAt,
+    snapshotSource,
+  };
+  const signature = isActive ? makeSignature({ alertType, protocol, marketKey }) : null;
+  const stateJson = JSON.stringify(state);
+  const message = isActive
+    ? `${protocol} withdrawable collateral available: ${amount?.toFixed?.(2) || amount} ${collateralSymbol || ""}`.trim()
+    : `${protocol} withdrawable collateral below alert threshold`;
+
+  if (isActive && !prevActive) {
+    logger.warn(`${logPrefix} NEW ALERT: ${message}`, state);
+    upsertPrimefiWithdrawState({
+      userId,
+      walletId,
+      chainId,
+      protocol,
+      marketKey,
+      alertType,
+      isActive: true,
+      signature,
+      stateJson,
+    });
+    insertPrimefiWithdrawLog({
+      userId,
+      walletId,
+      chainId,
+      protocol,
+      marketKey,
+      alertType,
+      phase: "NEW",
+      message,
+      meta: state,
+      signature,
+    });
+    await sendDmToUser({
+      userId,
+      phase: "NEW",
+      alertType,
+      logPrefix,
+      message,
+      meta: state,
+    });
+    return;
+  }
+
+  if (!isActive && prevActive) {
+    logger.info(`${logPrefix} RESOLVED: ${message}`, state);
+    upsertPrimefiWithdrawState({
+      userId,
+      walletId,
+      chainId,
+      protocol,
+      marketKey,
+      alertType,
+      isActive: false,
+      signature: null,
+      stateJson,
+    });
+    insertPrimefiWithdrawLog({
+      userId,
+      walletId,
+      chainId,
+      protocol,
+      marketKey,
+      alertType,
+      phase: "RESOLVED",
+      message,
+      meta: state,
+      signature: null,
+    });
+    return;
+  }
+
+  upsertPrimefiWithdrawState({
+    userId,
+    walletId,
+    chainId,
+    protocol,
+    marketKey,
+    alertType,
+    isActive,
+    signature,
+    stateJson,
+  });
+}
+
 module.exports = {
   setAlertEngineClient,
   handleLiquidationAlert,
   handleRedemptionAlert,
   handleLpRangeAlert,
+  handlePrimefiWithdrawAlert,
 };
