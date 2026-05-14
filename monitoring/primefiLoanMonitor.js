@@ -194,7 +194,7 @@ function enrichPrimefiSummary(db, summary, historyRows) {
   return summary;
 }
 
-async function refreshPrimefiLoanSnapshots(runId) {
+async function refreshPrimefiLoanSnapshots(runId, { enableAlerts = true } = {}) {
   const db = getDb();
   const wallets = db.prepare(`
     SELECT uw.id AS walletId, uw.user_id AS userId, uw.chain_id AS chainId,
@@ -402,23 +402,25 @@ async function refreshPrimefiLoanSnapshots(runId) {
           market_key: market.key,
           snapshot_json: snapshotJson,
         });
-        await handlePrimefiWithdrawAlert({
-          userId: wallet.userId,
-          walletId: wallet.walletId,
-          chainId: wallet.chainId,
-          protocol: market.protocol,
-          marketKey: market.key,
-          walletAddress: wallet.addressEip55,
-          walletLabel: wallet.walletLabel || null,
-          collateralSymbol: market.collateralSymbol,
-          withdrawableNowAmount,
-          withdrawableNowUsd,
-          withdrawableByRiskAmount,
-          reserveAvailableAmount,
-          withdrawableConstraint,
-          snapshotAt: new Date().toISOString(),
-          snapshotSource: "rpc",
-        });
+        if (enableAlerts) {
+          await handlePrimefiWithdrawAlert({
+            userId: wallet.userId,
+            walletId: wallet.walletId,
+            chainId: wallet.chainId,
+            protocol: market.protocol,
+            marketKey: market.key,
+            walletAddress: wallet.addressEip55,
+            walletLabel: wallet.walletLabel || null,
+            collateralSymbol: market.collateralSymbol,
+            withdrawableNowAmount,
+            withdrawableNowUsd,
+            withdrawableByRiskAmount,
+            reserveAvailableAmount,
+            withdrawableConstraint,
+            snapshotAt: new Date().toISOString(),
+            snapshotSource: "rpc",
+          });
+        }
         inserted.push(summary);
       } catch (err) {
         logger.warn(`[primefiLoanMonitor] snapshot failed wallet=${wallet.addressEip55} protocol=${market.protocol}: ${err?.message || err}`);

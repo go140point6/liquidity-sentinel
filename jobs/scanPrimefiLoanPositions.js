@@ -13,7 +13,7 @@ async function main() {
   getDb();
   const runId = String(Date.now());
   logger.info('[scanPrimefiLoanPositions] start');
-  const rows = await refreshPrimefiLoanSnapshots(runId);
+  const rows = await refreshPrimefiLoanSnapshots(runId, { enableAlerts: false });
   logger.info(`[scanPrimefiLoanPositions] done positions=${rows.length}`);
 }
 

@@ -992,6 +992,13 @@ async function describeLoanFromSnapshot(row, snapshot, { cdpState } = {}) {
 // Public API: monitorLoans
 // -----------------------------
 async function monitorLoans() {
+  const primefiRunId = String(Date.now());
+  try {
+    await refreshPrimefiLoanSnapshots(primefiRunId);
+  } catch (e) {
+    logger.warn(`[loanMonitor] PrimeFi snapshot refresh failed during monitor cycle: ${e?.message || e}`);
+  }
+
   const rows = getMonitoredLoanRows();
   if (!rows.length) return;
 
