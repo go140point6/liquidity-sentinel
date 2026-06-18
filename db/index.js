@@ -557,6 +557,58 @@ function initSchema(db) {
 
   CREATE INDEX IF NOT EXISTS idx_primefi_market_events_lookup ON primefi_market_events(chain_id, market_key, user_lower, block_number, log_index);
 
+  CREATE TABLE IF NOT EXISTS loan_redemption_event_cursors (
+    contract_id         INTEGER PRIMARY KEY,
+    trove_manager_lower TEXT NOT NULL,
+    trove_manager_eip55 TEXT NOT NULL,
+    start_block         INTEGER NOT NULL DEFAULT 0 CHECK (start_block >= 0),
+    last_scanned_block  INTEGER NOT NULL DEFAULT 0 CHECK (last_scanned_block >= 0),
+    last_scanned_at     TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (contract_id) REFERENCES contracts(id) ON DELETE CASCADE,
+    CHECK (trove_manager_lower = lower(trove_manager_lower)),
+    CHECK (length(trove_manager_lower) = 42 AND substr(trove_manager_lower, 1, 2) = '0x'),
+    CHECK (length(trove_manager_eip55) = 42 AND substr(trove_manager_eip55, 1, 2) = '0x')
+  );
+
+  CREATE TABLE IF NOT EXISTS loan_redemption_events (
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    chain_id                  TEXT NOT NULL,
+    contract_id               INTEGER NOT NULL,
+    protocol                  TEXT NOT NULL,
+    trove_manager_lower       TEXT NOT NULL,
+    trove_manager_eip55       TEXT NOT NULL,
+    trove_id                  TEXT NOT NULL,
+    coll_symbol               TEXT,
+    block_number              INTEGER NOT NULL,
+    block_timestamp           INTEGER,
+    tx_hash                   TEXT NOT NULL,
+    fee_log_index             INTEGER NOT NULL,
+    trove_operation_log_index INTEGER,
+    trove_updated_log_index   INTEGER,
+    interest_rate_pct         REAL,
+    pre_debt                  REAL,
+    post_debt                 REAL,
+    redeemed_debt             REAL,
+    pre_coll                  REAL,
+    post_coll                 REAL,
+    redeemed_coll             REAL,
+    fee_coll                  REAL,
+    event_json                TEXT NOT NULL,
+    created_at                TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (contract_id) REFERENCES contracts(id) ON DELETE CASCADE,
+    CHECK (trove_manager_lower = lower(trove_manager_lower)),
+    CHECK (length(trove_manager_lower) = 42 AND substr(trove_manager_lower, 1, 2) = '0x'),
+    CHECK (length(trove_manager_eip55) = 42 AND substr(trove_manager_eip55, 1, 2) = '0x'),
+    UNIQUE (contract_id, tx_hash, fee_log_index)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_loan_redemption_events_position
+    ON loan_redemption_events(contract_id, trove_id, id);
+  CREATE INDEX IF NOT EXISTS idx_loan_redemption_events_block
+    ON loan_redemption_events(contract_id, block_number, fee_log_index);
+
   CREATE TABLE IF NOT EXISTS primefi_loan_position_snapshot_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id         INTEGER NOT NULL,

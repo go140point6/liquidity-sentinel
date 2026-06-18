@@ -23,7 +23,11 @@ const activePoolAbi = require("../abi/activePool.json");
 const { getDb } = require("../db");
 const { getProviderForChain } = require("../utils/ethers/providers");
 const { acquireLock, releaseLock } = require("../utils/lock");
-const { handleLiquidationAlert, handleRedemptionAlert } = require("./alertEngine");
+const {
+  handleLiquidationAlert,
+  handleRedemptionAlert,
+  handleRedemptionEventAlert,
+} = require("./alertEngine");
 const {
   applyGlobalIrOffset,
   applyPriceMultiplier,
@@ -846,6 +850,24 @@ async function describeLoanPosition(
     status: statusStr,
   });
 
+  await handleRedemptionEventAlert({
+    userId,
+    walletId,
+    contractId,
+    positionId: String(troveId),
+    protocol,
+    wallet: owner,
+    walletLabel,
+    walletAddress: owner,
+    chainId,
+    currentInterestPct: interestPct,
+    currentDebtAmount: debtNorm,
+    currentStatus: statusStr,
+    collSymbol,
+    snapshotAt,
+    snapshotSource: "rpc",
+  });
+
 }
 
 async function describeLoanFromSnapshot(row, snapshot, { cdpState } = {}) {
@@ -985,6 +1007,24 @@ async function describeLoanFromSnapshot(row, snapshot, { cdpState } = {}) {
     snapshotSource: "snapshot",
     isCDPActive: cdpIsActive,
     status: statusStr,
+  });
+
+  await handleRedemptionEventAlert({
+    userId,
+    walletId,
+    contractId,
+    positionId: String(troveId),
+    protocol,
+    wallet: owner,
+    walletLabel,
+    walletAddress: owner,
+    chainId,
+    currentInterestPct: loanIR,
+    currentDebtAmount: debtAmount,
+    currentStatus: statusStr,
+    collSymbol: snapshot.collSymbol || null,
+    snapshotAt,
+    snapshotSource: "snapshot",
   });
 }
 
