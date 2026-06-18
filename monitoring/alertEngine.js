@@ -58,6 +58,41 @@ function renderPositionBar(pct) {
   return `0% |${left}o${right}| 100%`;
 }
 
+function fmtPctValue(pct) {
+  return typeof pct === "number" && Number.isFinite(pct) ? `${(pct * 100).toFixed(2)}%` : "n/a";
+}
+
+function fmtNumber2(v) {
+  return typeof v === "number" && Number.isFinite(v)
+    ? new Intl.NumberFormat("en-US", {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 2,
+      }).format(v)
+    : "n/a";
+}
+
+function redemptionEventStageLabel(stage) {
+  if (stage == null) return "n/a";
+  if (stage === 0) return "NEW (<25%)";
+  return `${stage}% reached`;
+}
+
+function redemptionEventStageBucket(pct) {
+  if (!(typeof pct === "number" && Number.isFinite(pct) && pct > 0)) return null;
+  if (pct >= LOAN_REDEMPTION_EVENT_STAGE_100_PCT) return 100;
+  if (pct >= LOAN_REDEMPTION_EVENT_STAGE_75_PCT) return 75;
+  if (pct >= LOAN_REDEMPTION_EVENT_STAGE_50_PCT) return 50;
+  if (pct >= LOAN_REDEMPTION_EVENT_STAGE_25_PCT) return 25;
+  return 0;
+}
+
+function sameInterestRate(a, b) {
+  if (!(typeof a === "number" && Number.isFinite(a) && typeof b === "number" && Number.isFinite(b))) {
+    return false;
+  }
+  return Math.abs(a - b) <= LOAN_REDEMPTION_EVENT_IR_CHANGE_EPSILON_PP;
+}
+
 function formatSnapshotLine(snapshotAt, source, staleWarnMs) {
   if (!snapshotAt) return null;
   const raw = String(snapshotAt);
@@ -148,6 +183,13 @@ const LOAN_LIQ_IMPROVING_DEBOUNCE_SEC = requireNumberEnv("LOAN_LIQ_IMPROVING_DEB
 
 const LOAN_REDEMP_WORSENING_DEBOUNCE_SEC = requireNumberEnv("LOAN_REDEMP_WORSENING_DEBOUNCE_SEC");
 const LOAN_REDEMP_IMPROVING_DEBOUNCE_SEC = requireNumberEnv("LOAN_REDEMP_IMPROVING_DEBOUNCE_SEC");
+const LOAN_REDEMPTION_EVENT_STAGE_25_PCT = requireNumberEnv("LOAN_REDEMPTION_EVENT_STAGE_25_PCT");
+const LOAN_REDEMPTION_EVENT_STAGE_50_PCT = requireNumberEnv("LOAN_REDEMPTION_EVENT_STAGE_50_PCT");
+const LOAN_REDEMPTION_EVENT_STAGE_75_PCT = requireNumberEnv("LOAN_REDEMPTION_EVENT_STAGE_75_PCT");
+const LOAN_REDEMPTION_EVENT_STAGE_100_PCT = requireNumberEnv("LOAN_REDEMPTION_EVENT_STAGE_100_PCT");
+const LOAN_REDEMPTION_EVENT_IR_CHANGE_EPSILON_PP = requireNumberEnv(
+  "LOAN_REDEMPTION_EVENT_IR_CHANGE_EPSILON_PP"
+);
 
 const LOAN_LIQ_WORSENING_DEBOUNCE_MS = Math.max(
   0,
@@ -166,6 +208,19 @@ const LOAN_REDEMP_IMPROVING_DEBOUNCE_MS = Math.max(
   0,
   Math.floor(LOAN_REDEMP_IMPROVING_DEBOUNCE_SEC * 1000)
 );
+
+if (
+  !(
+    LOAN_REDEMPTION_EVENT_STAGE_25_PCT > 0 &&
+    LOAN_REDEMPTION_EVENT_STAGE_25_PCT < LOAN_REDEMPTION_EVENT_STAGE_50_PCT &&
+    LOAN_REDEMPTION_EVENT_STAGE_50_PCT < LOAN_REDEMPTION_EVENT_STAGE_75_PCT &&
+    LOAN_REDEMPTION_EVENT_STAGE_75_PCT < LOAN_REDEMPTION_EVENT_STAGE_100_PCT
+  )
+) {
+  throw new Error(
+    "[alertEngine] Redemption event stages must be strictly increasing: 25 < 50 < 75 < 100"
+  );
+}
 
 // -----------------------------
 // Helpers
@@ -279,6 +334,74 @@ async function sendDmToUser({ userId, phase, alertType, logPrefix, message, meta
   if (!user) return;
 
   try {
+    if (alertType === "REDEMPTION_EVENT") {
+      if (phase !== "NEW" && phase !== "UPDATED") return;
+
+      const currentStage = Number(meta?.currentStage);
+      const pctText = fmtPctValue(meta?.sessionRedeemedPct);
+      const debtText = fmtNumber2(meta?.sessionRedeemedDebt);
+      const collText = meta?.collSymbol
+        ? `${fmtNumber2(meta?.sessionRedeemedColl)} ${meta.collSymbol}`
+        : fmtNumber2(meta?.sessionRedeemedColl);
+      const currentIrText =
+        typeof meta?.currentInterestPct === "number" && Number.isFinite(meta.currentInterestPct)
+          ? `${meta.currentInterestPct.toFixed(2)}%`
+          : "n/a";
+      const sessionIrText =
+        typeof meta?.sessionInterestPct === "number" && Number.isFinite(meta.sessionInterestPct)
+          ? `${meta.sessionInterestPct.toFixed(2)}%`
+          : "n/a";
+
+      const title =
+        phase === "NEW" ? "Redemption Event Alert ⚠️" : "Redemption Event Alert ↗️";
+      const color = currentStage >= 100 ? "Red" : currentStage >= 75 ? "Orange" : "Yellow";
+
+      const embed = new EmbedBuilder()
+        .setTitle(title)
+        .setDescription(`${meta?.protocol || "UNKNOWN_PROTOCOL"}`)
+        .setColor(color)
+        .setTimestamp();
+      if (client.user) embed.setThumbnail(client.user.displayAvatarURL());
+
+      const walletText = meta?.walletAddress
+        ? formatAddressLink(meta.chainId, meta.walletAddress)
+        : meta?.wallet || "n/a";
+      const troveText =
+        meta?.troveId && meta?.protocol
+          ? formatLoanTroveLink(meta.protocol, meta.troveId, meta.troveId)
+          : meta?.troveId || "n/a";
+
+      const fields = [
+        { name: "Trove", value: troveText, inline: true },
+        { name: "Wallet", value: walletText, inline: true },
+      ];
+      if (meta?.walletLabel) fields.push({ name: "Label", value: meta.walletLabel, inline: true });
+      fields.push(
+        { name: "Session redeemed", value: pctText, inline: true },
+        { name: "Debt redeemed", value: debtText, inline: true },
+        { name: "Collateral redeemed", value: collText, inline: true },
+        { name: "Current stage", value: redemptionEventStageLabel(currentStage), inline: true },
+        { name: "Current loan IR", value: currentIrText, inline: true },
+        { name: "Session IR", value: sessionIrText, inline: true },
+        {
+          name: "Meaning",
+          value: "Alert stays open until your loan IR changes or the redemption session completes.",
+          inline: false,
+        }
+      );
+
+      const snapshotLine = formatSnapshotLine(
+        meta?.snapshotAt,
+        meta?.snapshotSource,
+        LOAN_SNAPSHOT_STALE_WARN_MS
+      );
+      if (snapshotLine) fields.push({ name: "Data captured", value: snapshotLine, inline: false });
+      embed.addFields(fields);
+
+      await user.send({ embeds: [embed] });
+      return;
+    }
+
     if (alertType === "REDEMPTION") {
       if (phase === "NEW" || phase === "RESOLVED") return;
       const fmt2 = (v) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(2) : "n/a");
@@ -746,6 +869,43 @@ function getPrevState({ userId, walletId, contractId, tokenId, alertType }) {
 
   if (!row) return { isActive: 0, signature: null, stateJson: null, exists: false };
   return { ...row, exists: true };
+}
+
+function getLoanRedemptionEventsAfter({ contractId, tokenId, afterId = 0 }) {
+  const db = getDb();
+  return db
+    .prepare(
+      `
+      SELECT
+        id,
+        chain_id,
+        contract_id,
+        protocol,
+        trove_id,
+        coll_symbol,
+        block_number,
+        block_timestamp,
+        tx_hash,
+        fee_log_index,
+        trove_operation_log_index,
+        trove_updated_log_index,
+        interest_rate_pct,
+        pre_debt,
+        post_debt,
+        redeemed_debt,
+        pre_coll,
+        post_coll,
+        redeemed_coll,
+        fee_coll,
+        event_json
+      FROM loan_redemption_events
+      WHERE contract_id = ?
+        AND trove_id = ?
+        AND id > ?
+      ORDER BY id ASC
+    `
+    )
+    .all(contractId, String(tokenId), Math.max(0, Number(afterId) || 0));
 }
 
 function upsertAlertState({
@@ -2016,6 +2176,310 @@ async function handleRedemptionAlert(data) {
   });
 }
 
+async function handleRedemptionEventAlert(data) {
+  const {
+    userId,
+    walletId,
+    contractId,
+    positionId,
+    protocol,
+    wallet,
+    walletLabel,
+    walletAddress,
+    chainId,
+    currentInterestPct,
+    currentDebtAmount,
+    currentStatus,
+    collSymbol,
+    snapshotAt,
+    snapshotSource,
+  } = data || {};
+
+  const tokenId = String(positionId);
+  const alertType = "REDEMPTION_EVENT";
+  const logPrefix = "[REDEEM_EVT]";
+  const prev = getPrevState({ userId, walletId, contractId, tokenId, alertType });
+
+  let prevObj = null;
+  try {
+    prevObj = prev.stateJson ? JSON.parse(prev.stateJson) : null;
+  } catch (_) {
+    prevObj = null;
+  }
+
+  const lastProcessedEventId = Math.max(0, Number(prevObj?.lastProcessedEventId) || 0);
+  const rows = getLoanRedemptionEventsAfter({
+    contractId,
+    tokenId,
+    afterId: lastProcessedEventId,
+  });
+
+  let session = prev.isActive === 1 && prevObj?.session ? { ...prevObj.session } : null;
+  let sessionOpenedThisRun = false;
+  let notifyPhase = null;
+  let notifyMeta = null;
+  let resolvedReason = null;
+  let processedEventId = lastProcessedEventId;
+
+  for (const row of rows) {
+    processedEventId = Math.max(processedEventId, Number(row.id) || 0);
+    const eventInterestPct =
+      typeof row.interest_rate_pct === "number" && Number.isFinite(row.interest_rate_pct)
+        ? row.interest_rate_pct
+        : null;
+    const redeemedDebt =
+      typeof row.redeemed_debt === "number" && Number.isFinite(row.redeemed_debt)
+        ? Math.max(0, row.redeemed_debt)
+        : 0;
+    const redeemedColl =
+      typeof row.redeemed_coll === "number" && Number.isFinite(row.redeemed_coll)
+        ? Math.max(0, row.redeemed_coll)
+        : 0;
+    const preDebt =
+      typeof row.pre_debt === "number" && Number.isFinite(row.pre_debt) ? row.pre_debt : null;
+    const preColl =
+      typeof row.pre_coll === "number" && Number.isFinite(row.pre_coll) ? row.pre_coll : null;
+
+    const nextSession = () => {
+      const baselineDebt =
+        preDebt != null && preDebt > 0
+          ? preDebt
+          : typeof row.post_debt === "number" && Number.isFinite(row.post_debt)
+          ? row.post_debt + redeemedDebt
+          : redeemedDebt;
+      const pct =
+        baselineDebt > 0 && Number.isFinite(baselineDebt) ? redeemedDebt / baselineDebt : null;
+      return {
+        startEventId: Number(row.id),
+        latestEventId: Number(row.id),
+        latestTxHash: row.tx_hash,
+        latestBlockNumber: row.block_number,
+        latestBlockTimestamp: row.block_timestamp,
+        sessionInterestPct: eventInterestPct,
+        sessionPreDebt: baselineDebt,
+        sessionPreColl: preColl,
+        sessionRedeemedDebt: redeemedDebt,
+        sessionRedeemedColl: redeemedColl,
+        sessionRedeemedPct: pct,
+        currentStage: redemptionEventStageBucket(pct),
+      };
+    };
+
+    if (!session) {
+      session = nextSession();
+      sessionOpenedThisRun = true;
+      continue;
+    }
+
+    if (!sameInterestRate(session.sessionInterestPct, eventInterestPct)) {
+      resolvedReason = "IR_CHANGE";
+      session = nextSession();
+      sessionOpenedThisRun = true;
+      continue;
+    }
+
+    session.latestEventId = Number(row.id);
+    session.latestTxHash = row.tx_hash;
+    session.latestBlockNumber = row.block_number;
+    session.latestBlockTimestamp = row.block_timestamp;
+    session.sessionRedeemedDebt += redeemedDebt;
+    session.sessionRedeemedColl += redeemedColl;
+    session.sessionRedeemedPct =
+      session.sessionPreDebt > 0 && Number.isFinite(session.sessionPreDebt)
+        ? session.sessionRedeemedDebt / session.sessionPreDebt
+        : null;
+    session.currentStage = redemptionEventStageBucket(session.sessionRedeemedPct);
+  }
+
+  if (session && currentInterestPct != null && session.sessionInterestPct != null) {
+    if (!sameInterestRate(session.sessionInterestPct, currentInterestPct)) {
+      resolvedReason = "IR_CHANGE";
+      session = null;
+    }
+  }
+
+  let completed = false;
+  if (session) {
+    const stage = redemptionEventStageBucket(session.sessionRedeemedPct);
+    session.currentStage = stage;
+    if (
+      stage === 100 ||
+      String(currentStatus || "").toUpperCase() === "CLOSED_BY_REDEMPTION"
+    ) {
+      completed = true;
+      if (stage == null || stage < 100) {
+        session.sessionRedeemedPct = Math.max(
+          LOAN_REDEMPTION_EVENT_STAGE_100_PCT,
+          Number(session.sessionRedeemedPct) || 0
+        );
+        session.currentStage = 100;
+      }
+    }
+  }
+
+  const prevStage = Number(prevObj?.lastStage);
+  if (session) {
+    const currentStage = Number(session.currentStage);
+    if (sessionOpenedThisRun) {
+      notifyPhase = "NEW";
+    } else if (
+      Number.isFinite(currentStage) &&
+      (!Number.isFinite(prevStage) || currentStage > prevStage)
+    ) {
+      notifyPhase = "UPDATED";
+    }
+
+    if (notifyPhase) {
+      notifyMeta = {
+        wallet: shortenAddress(wallet),
+        walletLabel,
+        walletAddress: walletAddress || wallet,
+        chainId,
+        protocol,
+        troveId: shortenTroveId(tokenId),
+        sessionRedeemedPct: session.sessionRedeemedPct,
+        sessionRedeemedDebt: session.sessionRedeemedDebt,
+        sessionRedeemedColl: session.sessionRedeemedColl,
+        sessionInterestPct: session.sessionInterestPct,
+        currentInterestPct:
+          typeof currentInterestPct === "number" && Number.isFinite(currentInterestPct)
+            ? currentInterestPct
+            : session.sessionInterestPct,
+        currentDebtAmount,
+        currentStatus,
+        currentStage: session.currentStage,
+        collSymbol: collSymbol || null,
+        snapshotAt,
+        snapshotSource,
+      };
+    }
+  }
+
+  const nextState = {
+    kind: "LOAN_REDEMPTION_EVENT",
+    lastProcessedEventId: processedEventId,
+    lastStage: session ? session.currentStage : prevObj?.lastStage ?? null,
+    session: completed ? null : session,
+    resolvedReason: completed ? "COMPLETED" : resolvedReason,
+    snapshotAt: snapshotAt || null,
+    snapshotSource: snapshotSource || null,
+  };
+  const stateJson = JSON.stringify(nextState);
+  const signature =
+    session && !completed
+      ? makeSignature({
+          alertType,
+          sessionStartEventId: session.startEventId,
+          latestEventId: session.latestEventId,
+          currentStage: session.currentStage,
+          sessionRedeemedDebt: session.sessionRedeemedDebt,
+          sessionRedeemedPct:
+            session.sessionRedeemedPct == null
+              ? null
+              : Math.round(session.sessionRedeemedPct * 10000),
+        })
+      : null;
+
+  if (notifyPhase && notifyMeta) {
+    const message =
+      `${protocol} redemption session ${fmtPctValue(notifyMeta.sessionRedeemedPct)} ` +
+      `(${redemptionEventStageLabel(notifyMeta.currentStage)})`;
+    const level = notifyPhase === "NEW" ? "warn" : "info";
+    logger[level](`${logPrefix} ${notifyPhase} ALERT: ${message}`, notifyMeta);
+    upsertAlertState({
+      userId,
+      walletId,
+      contractId,
+      tokenId,
+      alertType,
+      isActive: completed ? false : true,
+      signature,
+      stateJson,
+    });
+    insertAlertLog({
+      userId,
+      walletId,
+      contractId,
+      tokenId,
+      alertType,
+      phase: notifyPhase,
+      message,
+      meta: notifyMeta,
+      signature,
+    });
+    await sendDmToUser({
+      userId,
+      phase: notifyPhase,
+      alertType,
+      logPrefix,
+      message,
+      meta: notifyMeta,
+    });
+    return;
+  }
+
+  if (!session && prev.isActive === 1) {
+    const message =
+      resolvedReason === "IR_CHANGE"
+        ? `${protocol} redemption session cleared by IR change`
+        : `${protocol} redemption session resolved`;
+    logger.info(`${logPrefix} RESOLVED: ${message}`, {
+      wallet: shortenAddress(wallet),
+      walletLabel,
+      walletAddress: walletAddress || wallet,
+      chainId,
+      protocol,
+      troveId: shortenTroveId(tokenId),
+      resolvedReason,
+      snapshotAt,
+      snapshotSource,
+    });
+    upsertAlertState({
+      userId,
+      walletId,
+      contractId,
+      tokenId,
+      alertType,
+      isActive: false,
+      signature: null,
+      stateJson,
+    });
+    insertAlertLog({
+      userId,
+      walletId,
+      contractId,
+      tokenId,
+      alertType,
+      phase: "RESOLVED",
+      message,
+      meta: {
+        wallet: shortenAddress(wallet),
+        walletLabel,
+        walletAddress: walletAddress || wallet,
+        chainId,
+        protocol,
+        troveId: shortenTroveId(tokenId),
+        resolvedReason,
+        snapshotAt,
+        snapshotSource,
+      },
+      signature: null,
+    });
+    return;
+  }
+
+  upsertAlertState({
+    userId,
+    walletId,
+    contractId,
+    tokenId,
+    alertType,
+    isActive: session && !completed,
+    signature,
+    stateJson,
+  });
+}
+
 async function handleLpRangeAlert(data) {
   const {
     userId,
@@ -2391,6 +2855,7 @@ module.exports = {
   setAlertEngineClient,
   handleLiquidationAlert,
   handleRedemptionAlert,
+  handleRedemptionEventAlert,
   handleLpRangeAlert,
   handlePrimefiWithdrawAlert,
 };

@@ -37,6 +37,7 @@ async function onMessage(message) {
       "User commands:",
       "• `/my-wallets` — manage wallets and labels",
       "• `/my-loans` — show monitored loan positions",
+      "• `/my-redemptions` — show active redemption-session state",
       "• `/my-lp` — show monitored LP positions",
       "• `/ignore-spam-tx` — manage ignored positions",
       "• `/redemption-rate` — target IR by redemption tier",
