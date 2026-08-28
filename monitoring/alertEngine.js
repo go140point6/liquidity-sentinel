@@ -2541,6 +2541,18 @@ async function handleLpRangeAlert(data) {
     return;
   }
 
+  // UNKNOWN is an unreliable observation (usually a transient RPC/revert
+  // failure), not a confirmed range or risk state. Preserve the last known
+  // alert state and wait for a usable observation before evaluating changes.
+  if (currStatus === "UNKNOWN" || tierU === "UNKNOWN") {
+    logger.debug(
+      `[LP] Ignoring unconfirmed range observation (${protocol || "UNKNOWN_PROTOCOL"} ` +
+        `${pairLabel || "UNKNOWN_PAIR"} token=${shortenTroveId(tokenId)} ` +
+        `wallet=${shortenAddress(wallet)} status=${currStatus} tier=${tierU})`
+    );
+    return;
+  }
+
   const prev = getPrevState({ userId, walletId, contractId, tokenId, alertType });
   const prevActive = prev.isActive === 1;
 
@@ -2590,6 +2602,34 @@ async function handleLpRangeAlert(data) {
     return;
   }
 
+  if (prevStatusU === "UNKNOWN" || prevTierU === "UNKNOWN") {
+    logger.debug(
+      `[LP] Restoring reliable range baseline (${protocol || "UNKNOWN_PROTOCOL"} ` +
+        `${pairLabel || "UNKNOWN_PAIR"} token=${shortenTroveId(tokenId)} ` +
+        `wallet=${shortenAddress(wallet)} status=${currStatus} tier=${tierU})`
+    );
+    upsertAlertState({
+      userId,
+      walletId,
+      contractId,
+      tokenId,
+      alertType,
+      isActive: true,
+      signature,
+      stateJson: JSON.stringify({
+        kind: "LP",
+        rangeStatus: currStatus,
+        confirmedStatus: currStatus,
+        candidateStatus: null,
+        candidateSinceMs: 0,
+        lastAlertAtMs,
+        lastStatusChangeAtMs: 0,
+        lastTier: tierU,
+      }),
+    });
+    return;
+  }
+
   const statusChanged = prevStatusU !== currStatus;
   const rawTierChanged = prevTierU !== tierU;
   const tierChanged = !statusOnly && rawTierChanged;
@@ -2630,7 +2670,7 @@ async function handleLpRangeAlert(data) {
     }
   }
 
-  const LP_TIER_ORDER = ["LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"];
+  const LP_TIER_ORDER = ["LOW", "MEDIUM", "HIGH", "CRITICAL"];
   const escalated = isTierEscalation(prevTierU, tierU, LP_TIER_ORDER);
   const cooldownOk = true;
   const allowNotifyUpdate =

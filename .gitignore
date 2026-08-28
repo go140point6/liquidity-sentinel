@@ -135,3 +135,4 @@ data/archive
 ecosystem.config.js
 locks/
 data/metrics/
+.env-prod

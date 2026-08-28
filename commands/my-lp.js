@@ -20,6 +20,28 @@ function requireNumberEnv(name) {
 const LP_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LP_SNAPSHOT_STALE_WARN_MIN");
 const LP_SNAPSHOT_STALE_WARN_MS = Math.max(0, Math.floor(LP_SNAPSHOT_STALE_WARN_MIN * 60 * 1000));
 
+function parseSnapshotTs(raw) {
+  if (!raw) return null;
+  const value = String(raw);
+  const iso = value.includes("T") ? value : value.replace(" ", "T");
+  const ts = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
+  return Number.isFinite(ts) ? Math.floor(ts / 1000) : null;
+}
+
+function getStaleLpChains(summaries) {
+  const staleByChain = new Map();
+  for (const summary of summaries || []) {
+    const ts = parseSnapshotTs(summary?.snapshotAt);
+    if (ts != null && Date.now() - ts * 1000 <= LP_SNAPSHOT_STALE_WARN_MS) continue;
+    const chainId = String(summary?.chainId || "UNKNOWN").toUpperCase();
+    const previous = staleByChain.get(chainId);
+    if (!staleByChain.has(chainId) || ts == null || (previous != null && ts < previous)) {
+      staleByChain.set(chainId, ts);
+    }
+  }
+  return [...staleByChain.entries()].sort(([a], [b]) => a.localeCompare(b));
+}
+
 function chunk(arr, size) {
   const out = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
@@ -188,22 +210,15 @@ module.exports = {
         "_Amounts are estimated from liquidity + pool price; fees are current uncollected amounts when available._",
       ];
 
-      const snapshotTimes = displaySummaries
-        .map((s) => (s.snapshotAt ? String(s.snapshotAt) : null))
-        .filter(Boolean)
-        .map((raw) => {
-          const iso = raw.includes("T") ? raw : raw.replace(" ", "T");
-          const ts = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
-          return Number.isFinite(ts) ? Math.floor(ts / 1000) : null;
-        })
-        .filter((v) => v != null);
+      const snapshotTimes = displaySummaries.map((s) => parseSnapshotTs(s.snapshotAt)).filter((v) => v != null);
       if (snapshotTimes.length) {
         const latest = Math.max(...snapshotTimes);
-        const ageMs = Date.now() - latest * 1000;
-        const stale = ageMs > LP_SNAPSHOT_STALE_WARN_MS;
-        const warn = stale ? " ⚠️ Data may be stale." : "";
         descLines.push("");
-        descLines.push(`Data captured: <t:${latest}:f>${warn}`);
+        descLines.push(`Data captured: <t:${latest}:f>`);
+      }
+      for (const [chainId, ts] of getStaleLpChains(displaySummaries)) {
+        const captured = ts == null ? "snapshot time unavailable" : `oldest snapshot <t:${ts}:R>`;
+        descLines.push(`⚠️ ${chainId} LP data may be stale (${captured}).`);
       }
 
       const tierColorEmoji = {
