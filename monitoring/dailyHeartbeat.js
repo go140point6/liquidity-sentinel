@@ -29,6 +29,8 @@ function requireNumberEnv(name) {
 const LOAN_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LOAN_SNAPSHOT_STALE_WARN_MIN");
 const LP_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LP_SNAPSHOT_STALE_WARN_MIN");
 const SP_POSITION_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("SP_POSITION_SNAPSHOT_STALE_WARN_MIN");
+const LOAN_SNAPSHOT_STALE_WARN_MS = Math.max(0, Math.floor(LOAN_SNAPSHOT_STALE_WARN_MIN * 60 * 1000));
+const LP_SNAPSHOT_STALE_WARN_MS = Math.max(0, Math.floor(LP_SNAPSHOT_STALE_WARN_MIN * 60 * 1000));
 const SNAPSHOT_STALE_WARN_MS = Math.max(
   0,
   Math.floor(Math.max(LOAN_SNAPSHOT_STALE_WARN_MIN, LP_SNAPSHOT_STALE_WARN_MIN, SP_POSITION_SNAPSHOT_STALE_WARN_MIN) * 60 * 1000)
@@ -143,6 +145,27 @@ function parseSnapshotTs(raw) {
   const ts = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
   if (!Number.isFinite(ts)) return null;
   return Math.floor(ts / 1000);
+}
+
+function hasStaleSnapshots(summaries, staleWarnMs) {
+  return (summaries || []).some((summary) => {
+    const ts = parseSnapshotTs(summary?.snapshotAt);
+    return ts == null || Date.now() - ts * 1000 > staleWarnMs;
+  });
+}
+
+function getStaleLpChains(summaries) {
+  const staleByChain = new Map();
+  for (const summary of summaries || []) {
+    const ts = parseSnapshotTs(summary?.snapshotAt);
+    if (ts != null && Date.now() - ts * 1000 <= LP_SNAPSHOT_STALE_WARN_MS) continue;
+    const chainId = String(summary?.chainId || "UNKNOWN").toUpperCase();
+    const previous = staleByChain.get(chainId);
+    if (!staleByChain.has(chainId) || ts == null || (previous != null && ts < previous)) {
+      staleByChain.set(chainId, ts);
+    }
+  }
+  return [...staleByChain.entries()].sort(([a], [b]) => a.localeCompare(b));
 }
 
 function formatSnapshotLine(snapshotAt) {
@@ -647,6 +670,10 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, spSummaries,
 
   const headerLines = [`Loans: **${loanCount}** | LPs: **${lpCount}** | ALMs: **${almCount}** | SPs: **${spCount}**`];
   if (snapshotLine) headerLines.push("", snapshotLine);
+  for (const [chainId, ts] of getStaleLpChains(activeLpSummaries)) {
+    const captured = ts == null ? "snapshot time unavailable" : `oldest snapshot <t:${ts}:R>`;
+    headerLines.push(`⚠️ ${chainId} LP data may be stale (${captured}).`);
+  }
 
   const header = new EmbedBuilder()
     .setTitle("24h DeFi Heartbeat")
@@ -918,14 +945,11 @@ async function sendDailyHeartbeat(client) {
     return;
   }
 
-  const latestSnapshotTs = []
-    .concat(allLoanSummaries || [])
-    .concat(allLpSummaries || [])
-    .map((s) => parseSnapshotTs(s?.snapshotAt))
-    .filter((v) => v != null)
-    .reduce((max, v) => (v > max ? v : max), 0);
-  const latestSnapshotMs = latestSnapshotTs ? latestSnapshotTs * 1000 : 0;
-  const isStale = !latestSnapshotMs || Date.now() - latestSnapshotMs > SNAPSHOT_STALE_WARN_MS;
+  const noSnapshots = !(allLoanSummaries || []).length && !(allLpSummaries || []).length;
+  const isStale =
+    noSnapshots ||
+    hasStaleSnapshots(allLoanSummaries, LOAN_SNAPSHOT_STALE_WARN_MS) ||
+    hasStaleSnapshots(allLpSummaries, LP_SNAPSHOT_STALE_WARN_MS);
 
   if (isStale) {
     logger.warn("[Heartbeat] Snapshot data stale; refreshing before send.");

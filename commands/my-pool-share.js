@@ -22,6 +22,28 @@ const LP_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LP_SNAPSHOT_STALE_WARN_MIN"
 const LP_SNAPSHOT_STALE_WARN_MS = Math.max(0, Math.floor(LP_SNAPSHOT_STALE_WARN_MIN * 60 * 1000));
 const fmtPct2 = createDecimalFormatter(2, 2);
 
+function parseSnapshotTs(raw) {
+  if (!raw) return null;
+  const value = String(raw);
+  const iso = value.includes("T") ? value : value.replace(" ", "T");
+  const ts = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
+  return Number.isFinite(ts) ? Math.floor(ts / 1000) : null;
+}
+
+function getStaleLpChains(summaries) {
+  const staleByChain = new Map();
+  for (const summary of summaries || []) {
+    const ts = parseSnapshotTs(summary?.snapshotAt);
+    if (ts != null && Date.now() - ts * 1000 <= LP_SNAPSHOT_STALE_WARN_MS) continue;
+    const chainId = String(summary?.chainId || "UNKNOWN").toUpperCase();
+    const previous = staleByChain.get(chainId);
+    if (!staleByChain.has(chainId) || ts == null || (previous != null && ts < previous)) {
+      staleByChain.set(chainId, ts);
+    }
+  }
+  return [...staleByChain.entries()].sort(([a], [b]) => a.localeCompare(b));
+}
+
 function computePoolSharePct(liquidityRaw, poolLiquidityRaw) {
   if (!liquidityRaw || !poolLiquidityRaw) return null;
   try {
@@ -152,19 +174,14 @@ module.exports = {
       }
       fields.sort((a, b) => (b._pct || 0) - (a._pct || 0));
 
-      const snapshotTimes = active
-        .map((s) => (s.snapshotAt ? String(s.snapshotAt) : null))
-        .filter(Boolean)
-        .map((raw) => {
-          const iso = raw.includes("T") ? raw : raw.replace(" ", "T");
-          const ts = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
-          return Number.isFinite(ts) ? Math.floor(ts / 1000) : null;
-        })
-        .filter((v) => v != null);
+      const snapshotTimes = active.map((s) => parseSnapshotTs(s.snapshotAt)).filter((v) => v != null);
       const latest = snapshotTimes.length ? Math.max(...snapshotTimes) : null;
-      const stale = latest != null ? Date.now() - latest * 1000 > LP_SNAPSHOT_STALE_WARN_MS : false;
-      const warn = stale ? " ⚠️ Data may be stale." : "";
-      const dataCaptured = latest != null ? `Data captured: <t:${latest}:f>${warn}` : "Data captured: n/a";
+      const descriptionLines = [latest != null ? `Data captured: <t:${latest}:f>` : "Data captured: n/a"];
+      for (const [chainId, ts] of getStaleLpChains(active)) {
+        const captured = ts == null ? "snapshot time unavailable" : `oldest snapshot <t:${ts}:R>`;
+        descriptionLines.push(`⚠️ ${chainId} LP data may be stale (${captured}).`);
+      }
+      const dataCaptured = descriptionLines.join("\n");
 
       const chunks = chunkFieldsBySize(fields, "My Pool Share".length + dataCaptured.length + 250, 5200);
       const embeds = chunks.map((chunk, idx) => {

@@ -1411,7 +1411,7 @@ async function main() {
         if (forceLp) {
           logger.debug("[scanLoanLpPositions] LP snapshot refresh forced by SCAN_FORCE_REFRESH_LP");
         }
-        await refreshLpSnapshots();
+        await refreshLpSnapshots({ includeAllInactive: forceLp });
         if (forceLp) clearForceRefreshFlag(db, "LP");
       }
 

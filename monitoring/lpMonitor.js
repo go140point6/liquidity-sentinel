@@ -188,6 +188,10 @@ const LP_EDGE_HIGH_FRAC = Number(process.env.LP_EDGE_HIGH_FRAC);
 const LP_OUT_WARN_FRAC = Number(process.env.LP_OUT_WARN_FRAC);
 const LP_OUT_HIGH_FRAC = Number(process.env.LP_OUT_HIGH_FRAC);
 const LP_SNAPSHOT_STALE_WARN_MIN = requireNumberEnv("LP_SNAPSHOT_STALE_WARN_MIN");
+const LP_INACTIVE_RECHECK_BATCH = requireNumberEnv("LP_INACTIVE_RECHECK_BATCH");
+if (!Number.isInteger(LP_INACTIVE_RECHECK_BATCH) || LP_INACTIVE_RECHECK_BATCH <= 0) {
+  throw new Error("LP_INACTIVE_RECHECK_BATCH must be a positive integer");
+}
 const SNAPSHOT_LOCK_NAME = "snapshot-refresh";
 const ALM_ROLLING_24H_MS = 24 * 60 * 60 * 1000;
 
@@ -770,10 +774,101 @@ function upsertLpSnapshot(snapshot, runId) {
   });
 }
 
-function cleanupLpSnapshots(runId) {
-  if (!runId) return;
+function lpSnapshotKey({ userId, walletId, contractId, tokenId }) {
+  return `${userId}:${walletId}:${contractId}:${String(tokenId)}`;
+}
+
+function cleanupLpSnapshots(monitoredRows) {
+  if (!Array.isArray(monitoredRows)) return;
   const db = getDb();
-  db.prepare(`DELETE FROM lp_position_snapshots WHERE snapshot_run_id != ?`).run(runId);
+  const monitoredKeys = new Set(monitoredRows.map(lpSnapshotKey));
+  const existingRows = db
+    .prepare(`
+      SELECT
+        user_id AS userId,
+        wallet_id AS walletId,
+        contract_id AS contractId,
+        token_id AS tokenId
+      FROM lp_position_snapshots
+    `)
+    .all();
+  const staleRows = existingRows.filter((row) => !monitoredKeys.has(lpSnapshotKey(row)));
+  if (!staleRows.length) return;
+
+  const deleteStmt = db.prepare(`
+    DELETE FROM lp_position_snapshots
+    WHERE user_id = ? AND wallet_id = ? AND contract_id = ? AND token_id = ?
+  `);
+  const deleteStaleRows = db.transaction((rows) => {
+    for (const row of rows) {
+      deleteStmt.run(row.userId, row.walletId, row.contractId, row.tokenId);
+    }
+  });
+  deleteStaleRows(staleRows);
+  logger.debug(`[LP] Snapshot cleanup removed ${staleRows.length} unmonitored row(s)`);
+}
+
+function isReliableLpSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return false;
+
+  const status = String(snapshot.status || "UNKNOWN").toUpperCase();
+  const rangeStatus = String(snapshot.rangeStatus || status).toUpperCase();
+  const tier = String(snapshot.lpRangeTier || "UNKNOWN").toUpperCase();
+
+  if (status === "INACTIVE" || rangeStatus === "INACTIVE") return true;
+  if (snapshot.positionModel === "ALM") return status === "ACTIVE";
+
+  return (
+    (rangeStatus === "IN_RANGE" || rangeStatus === "OUT_OF_RANGE") &&
+    tier !== "UNKNOWN" &&
+    snapshot.currentTick != null &&
+    Number.isFinite(Number(snapshot.currentTick))
+  );
+}
+
+function isInactiveLpSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return false;
+  const status = String(snapshot.status || "UNKNOWN").toUpperCase();
+  const rangeStatus = String(snapshot.rangeStatus || status).toUpperCase();
+  return status === "INACTIVE" || rangeStatus === "INACTIVE";
+}
+
+function getLpSnapshotMap() {
+  const db = getDb();
+  const rows = db
+    .prepare(`
+      SELECT
+        user_id AS userId,
+        wallet_id AS walletId,
+        contract_id AS contractId,
+        token_id AS tokenId,
+        snapshot_run_id AS snapshotRunId,
+        snapshot_at AS snapshotAt,
+        snapshot_json AS snapshotJson
+      FROM lp_position_snapshots
+    `)
+    .all();
+  const out = new Map();
+  for (const row of rows) {
+    try {
+      const snapshot = JSON.parse(row.snapshotJson);
+      if (snapshot && typeof snapshot === "object") {
+        snapshot.snapshotRunId = row.snapshotRunId;
+        snapshot.snapshotAt = row.snapshotAt;
+        out.set(lpSnapshotKey(row), snapshot);
+      }
+    } catch (_) {}
+  }
+  return out;
+}
+
+function markLpSnapshotAttempt(row, runId) {
+  const db = getDb();
+  db.prepare(`
+    UPDATE lp_position_snapshots
+    SET snapshot_run_id = ?
+    WHERE user_id = ? AND wallet_id = ? AND contract_id = ? AND token_id = ?
+  `).run(runId, row.userId, row.walletId, row.contractId, String(row.tokenId));
 }
 
 function toFiniteNumber(v) {
@@ -1580,12 +1675,55 @@ async function getLpSummaries(userId = null) {
   return out;
 }
 
-async function refreshLpSnapshots() {
+async function refreshLpSnapshots(options = {}) {
+  const includeAllInactive = options.includeAllInactive === true;
   const runId = String(Date.now());
   const rows = getMonitoredLpRows();
-  if (!rows || rows.length === 0) return;
+  if (!rows) return;
+  if (rows.length === 0) {
+    cleanupLpSnapshots(rows);
+    return;
+  }
   let ok = 0;
   let failed = 0;
+  let preserved = 0;
+
+  const previousSnapshots = getLpSnapshotMap();
+  const hotRows = [];
+  const inactiveRows = [];
+  for (const row of rows) {
+    const previous = previousSnapshots.get(lpSnapshotKey(row));
+    if (isInactiveLpSnapshot(previous)) {
+      inactiveRows.push({
+        row,
+        snapshotAt: previous.snapshotAt || null,
+        snapshotRunId: previous.snapshotRunId || null,
+      });
+    } else {
+      hotRows.push(row);
+    }
+  }
+  inactiveRows.sort((a, b) => {
+    const aRunMs = Number(a.snapshotRunId);
+    const bRunMs = Number(b.snapshotRunId);
+    const aMs = Number.isFinite(aRunMs) ? aRunMs : parseSnapshotMs(a.snapshotAt);
+    const bMs = Number.isFinite(bRunMs) ? bRunMs : parseSnapshotMs(b.snapshotAt);
+    const aSort = Number.isFinite(aMs) ? aMs : 0;
+    const bSort = Number.isFinite(bMs) ? bMs : 0;
+    if (aSort !== bSort) return aSort - bSort;
+    return lpSnapshotKey(a.row).localeCompare(lpSnapshotKey(b.row));
+  });
+  const selectedInactive = includeAllInactive
+    ? inactiveRows
+    : inactiveRows.slice(0, LP_INACTIVE_RECHECK_BATCH);
+  const refreshRows = hotRows.concat(selectedInactive.map((entry) => entry.row));
+  const selectedInactiveKeys = new Set(selectedInactive.map((entry) => lpSnapshotKey(entry.row)));
+
+  logger.debug(
+    `[LP] Snapshot refresh selection: monitored=${rows.length} hot=${hotRows.length} ` +
+      `inactive=${inactiveRows.length} selectedInactive=${selectedInactive.length} ` +
+      `includeAllInactive=${includeAllInactive ? 1 : 0}`
+  );
 
   const providers = new Map();
   const getP = (chainId) => {
@@ -1596,8 +1734,13 @@ async function refreshLpSnapshots() {
   };
 
   const steerCache = new Map();
-  for (const row of rows) {
+  for (const row of refreshRows) {
     const chainId = (row.chainId || "").toUpperCase();
+    if (selectedInactiveKeys.has(lpSnapshotKey(row))) {
+      // Advance the cold queue even when this attempt fails. snapshot_at and
+      // snapshot_json remain unchanged unless a reliable reading succeeds.
+      markLpSnapshotAttempt(row, runId);
+    }
     let provider;
     try {
       provider = getP(chainId);
@@ -1622,9 +1765,25 @@ async function refreshLpSnapshots() {
               row.protocol || "UNKNOWN_PROTOCOL",
               row
             );
-      if (summary) {
+      if (summary && isReliableLpSnapshot(summary)) {
         upsertLpSnapshot(summary, runId);
         ok += 1;
+      } else if (summary) {
+        const previous = previousSnapshots.get(lpSnapshotKey(row));
+        if (!previous) {
+          // Keep a first-seen position visible while waiting for its first
+          // reliable range reading. Future UNKNOWN readings will not refresh
+          // this timestamp or replace a reliable snapshot.
+          upsertLpSnapshot(summary, runId);
+          ok += 1;
+        } else {
+          preserved += 1;
+          logger.debug(
+            `[LP] Preserving previous snapshot tokenId=${row.tokenId} on ${chainId}; ` +
+              `new reading status=${summary.rangeStatus || summary.status || "UNKNOWN"} ` +
+              `tier=${summary.lpRangeTier || "UNKNOWN"}`
+          );
+        }
       } else {
         failed += 1;
       }
@@ -1637,9 +1796,12 @@ async function refreshLpSnapshots() {
     }
   }
 
-  cleanupLpSnapshots(runId);
+  // Keep the last successful snapshot when an individual position fails to
+  // refresh. Only remove snapshots for positions that are no longer monitored.
+  cleanupLpSnapshots(rows);
   logger.debug(
-    `[LP] Snapshot refresh complete: rows=${rows.length} ok=${ok} failed=${failed}`
+    `[LP] Snapshot refresh complete: monitored=${rows.length} refreshed=${refreshRows.length} ok=${ok} ` +
+      `preserved=${preserved} failed=${failed}`
   );
 }
 
