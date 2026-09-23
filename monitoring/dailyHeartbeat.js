@@ -168,6 +168,20 @@ function getStaleLpChains(summaries) {
   return [...staleByChain.entries()].sort(([a], [b]) => a.localeCompare(b));
 }
 
+function getStaleLoanChains(summaries) {
+  const staleByChain = new Map();
+  for (const summary of summaries || []) {
+    const ts = parseSnapshotTs(summary?.snapshotAt);
+    if (ts != null && Date.now() - ts * 1000 <= LOAN_SNAPSHOT_STALE_WARN_MS) continue;
+    const chainId = String(summary?.chainId || "UNKNOWN").toUpperCase();
+    const previous = staleByChain.get(chainId);
+    if (!staleByChain.has(chainId) || ts == null || (previous != null && ts < previous)) {
+      staleByChain.set(chainId, ts);
+    }
+  }
+  return [...staleByChain.entries()].sort(([a], [b]) => a.localeCompare(b));
+}
+
 function formatSnapshotLine(snapshotAt) {
   const ts = parseSnapshotTs(snapshotAt);
   if (!ts) return null;
@@ -670,6 +684,10 @@ function buildHeartbeatEmbeds({ nowIso, loanSummaries, lpSummaries, spSummaries,
 
   const headerLines = [`Loans: **${loanCount}** | LPs: **${lpCount}** | ALMs: **${almCount}** | SPs: **${spCount}**`];
   if (snapshotLine) headerLines.push("", snapshotLine);
+  for (const [chainId, ts] of getStaleLoanChains(activeLoanSummaries)) {
+    const captured = ts == null ? "snapshot time unavailable" : `oldest snapshot <t:${ts}:R>`;
+    headerLines.push(`⚠️ ${chainId} loan data may be stale (${captured}).`);
+  }
   for (const [chainId, ts] of getStaleLpChains(activeLpSummaries)) {
     const captured = ts == null ? "snapshot time unavailable" : `oldest snapshot <t:${ts}:R>`;
     headerLines.push(`⚠️ ${chainId} LP data may be stale (${captured}).`);

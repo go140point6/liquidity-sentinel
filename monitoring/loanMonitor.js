@@ -578,12 +578,36 @@ function upsertLoanSnapshot(snapshot, runId) {
   });
 }
 
-function cleanupLoanSnapshots(runId) {
-  if (!runId) return;
+function loanSnapshotKey({ userId, walletId, contractId, troveId, tokenId }) {
+  return `${userId}:${walletId}:${contractId}:${String(troveId ?? tokenId)}`;
+}
+
+function cleanupLoanSnapshots(monitoredRows) {
+  if (!Array.isArray(monitoredRows)) return;
   const db = getDb();
-  db.prepare(
-    `DELETE FROM loan_position_snapshots WHERE snapshot_run_id != ?`
-  ).run(runId);
+  const monitoredKeys = new Set(monitoredRows.map(loanSnapshotKey));
+  const existingRows = db.prepare(`
+    SELECT
+      user_id AS userId,
+      wallet_id AS walletId,
+      contract_id AS contractId,
+      token_id AS tokenId
+    FROM loan_position_snapshots
+  `).all();
+  const staleRows = existingRows.filter((row) => !monitoredKeys.has(loanSnapshotKey(row)));
+  if (!staleRows.length) return;
+
+  const deleteStmt = db.prepare(`
+    DELETE FROM loan_position_snapshots
+    WHERE user_id = ? AND wallet_id = ? AND contract_id = ? AND token_id = ?
+  `);
+  const deleteStaleRows = db.transaction((rows) => {
+    for (const row of rows) {
+      deleteStmt.run(row.userId, row.walletId, row.contractId, String(row.tokenId));
+    }
+  });
+  deleteStaleRows(staleRows);
+  logger.debug(`[loanMonitor] Snapshot cleanup removed ${staleRows.length} unmonitored row(s)`);
 }
 
 // -----------------------------
@@ -1236,7 +1260,10 @@ async function refreshLoanSnapshots() {
   await refreshPrimefiLoanSnapshots(runId);
   const rows = getMonitoredLoanRows();
   const sharedContractContext = new Map();
-  if (!rows.length) return sharedContractContext;
+  if (!rows.length) {
+    cleanupLoanSnapshots(rows);
+    return sharedContractContext;
+  }
 
   let globalIrMap = null;
   try {
@@ -1354,7 +1381,9 @@ async function refreshLoanSnapshots() {
     }
   }
 
-  cleanupLoanSnapshots(runId);
+  // Preserve the last successful snapshot when an individual loan fails to
+  // refresh. Only remove snapshots for positions no longer being monitored.
+  cleanupLoanSnapshots(rows);
   return sharedContractContext;
 }
 

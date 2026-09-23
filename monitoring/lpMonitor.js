@@ -292,6 +292,80 @@ async function getTokenDecimals(provider, address) {
   return out;
 }
 
+function isResolvedTokenSymbol(symbol, address) {
+  const value = String(symbol || "").trim();
+  if (!value) return false;
+  if (address && value.toLowerCase() === String(address).toLowerCase()) return false;
+  return !ethers.isAddress(value);
+}
+
+function hasResolvedLpTokenMetadata(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return false;
+  return (
+    isResolvedTokenSymbol(snapshot.token0Symbol, snapshot.token0) &&
+    isResolvedTokenSymbol(snapshot.token1Symbol, snapshot.token1)
+  );
+}
+
+function seedTokenMetadataFromSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return;
+
+  const entries = [
+    [snapshot.token0, snapshot.token0Symbol, snapshot.dec0],
+    [snapshot.token1, snapshot.token1Symbol, snapshot.dec1],
+  ];
+  for (const [address, symbol, decimals] of entries) {
+    const key = String(address || "").toLowerCase();
+    if (!key) continue;
+    if (isResolvedTokenSymbol(symbol, address)) tokenSymbolCache.set(key, symbol);
+    const dec = Number(decimals);
+    if (Number.isInteger(dec) && dec >= 0) tokenDecimalsCache.set(key, dec);
+  }
+}
+
+function inheritTokenMetadata(summary, previous) {
+  if (!summary || !previous) return summary;
+
+  const sameToken0 =
+    String(summary.token0 || "").toLowerCase() === String(previous.token0 || "").toLowerCase();
+  const sameToken1 =
+    String(summary.token1 || "").toLowerCase() === String(previous.token1 || "").toLowerCase();
+
+  if (
+    sameToken0 &&
+    !isResolvedTokenSymbol(summary.token0Symbol, summary.token0) &&
+    isResolvedTokenSymbol(previous.token0Symbol, previous.token0)
+  ) {
+    summary.token0Symbol = previous.token0Symbol;
+  }
+  if (
+    sameToken1 &&
+    !isResolvedTokenSymbol(summary.token1Symbol, summary.token1) &&
+    isResolvedTokenSymbol(previous.token1Symbol, previous.token1)
+  ) {
+    summary.token1Symbol = previous.token1Symbol;
+  }
+
+  const symbolsResolved =
+    isResolvedTokenSymbol(summary.token0Symbol, summary.token0) &&
+    isResolvedTokenSymbol(summary.token1Symbol, summary.token1);
+  if (symbolsResolved) {
+    const pairLabel = String(summary.pairLabel || "");
+    const containsAddressFallback = [summary.token0, summary.token1]
+      .filter(Boolean)
+      .some((address) => pairLabel.toLowerCase().includes(String(address).toLowerCase()));
+    if (!pairLabel || containsAddressFallback) {
+      summary.pairLabel = `${summary.token0Symbol}-${summary.token1Symbol}`;
+    }
+    summary.priceBaseSymbol = summary.token0Symbol;
+    summary.priceQuoteSymbol = summary.token1Symbol;
+  } else if (previous.pairLabel) {
+    summary.pairLabel = previous.pairLabel;
+  }
+
+  return summary;
+}
+
 // -----------------------------
 // Compute fees owed from pool feeGrowth
 // -----------------------------
@@ -818,9 +892,12 @@ function isReliableLpSnapshot(snapshot) {
   if (status === "INACTIVE" || rangeStatus === "INACTIVE") return true;
   if (snapshot.positionModel === "ALM") return status === "ACTIVE";
 
+  const metadataResolved = hasResolvedLpTokenMetadata(snapshot);
+
   return (
     (rangeStatus === "IN_RANGE" || rangeStatus === "OUT_OF_RANGE") &&
     tier !== "UNKNOWN" &&
+    metadataResolved &&
     snapshot.currentTick != null &&
     Number.isFinite(Number(snapshot.currentTick))
   );
@@ -1736,6 +1813,8 @@ async function refreshLpSnapshots(options = {}) {
   const steerCache = new Map();
   for (const row of refreshRows) {
     const chainId = (row.chainId || "").toUpperCase();
+    const previous = previousSnapshots.get(lpSnapshotKey(row));
+    seedTokenMetadataFromSnapshot(previous);
     if (selectedInactiveKeys.has(lpSnapshotKey(row))) {
       // Advance the cold queue even when this attempt fails. snapshot_at and
       // snapshot_json remain unchanged unless a reliable reading succeeds.
@@ -1750,7 +1829,7 @@ async function refreshLpSnapshots(options = {}) {
     }
 
     try {
-      const summary =
+      const freshSummary =
         row.contractKind === "LP_ALM"
           ? await summarizeSteerAlmPosition(
               provider,
@@ -1765,17 +1844,28 @@ async function refreshLpSnapshots(options = {}) {
               row.protocol || "UNKNOWN_PROTOCOL",
               row
             );
+      const summary = inheritTokenMetadata(freshSummary, previous);
       if (summary && isReliableLpSnapshot(summary)) {
         upsertLpSnapshot(summary, runId);
         ok += 1;
       } else if (summary) {
-        const previous = previousSnapshots.get(lpSnapshotKey(row));
         if (!previous) {
-          // Keep a first-seen position visible while waiting for its first
-          // reliable range reading. Future UNKNOWN readings will not refresh
-          // this timestamp or replace a reliable snapshot.
-          upsertLpSnapshot(summary, runId);
-          ok += 1;
+          if (
+            summary.positionModel !== "ALM" &&
+            String(summary.status || summary.rangeStatus || "").toUpperCase() !== "INACTIVE" &&
+            !hasResolvedLpTokenMetadata(summary)
+          ) {
+            failed += 1;
+            logger.debug(
+              `[LP] Deferring first snapshot tokenId=${row.tokenId} on ${chainId}; token metadata unresolved`
+            );
+          } else {
+            // Keep a first-seen position visible while waiting for its first
+            // reliable range reading. Future UNKNOWN readings will not refresh
+            // this timestamp or replace a reliable snapshot.
+            upsertLpSnapshot(summary, runId);
+            ok += 1;
+          }
         } else {
           preserved += 1;
           logger.debug(
@@ -1895,6 +1985,20 @@ async function describeLpPosition(provider, chainId, protocol, row, options = {}
     snapshotAt,
     snapshotSource: "rpc",
   });
+    return;
+  }
+
+  if (
+    !hasResolvedLpTokenMetadata({
+      token0,
+      token1,
+      token0Symbol: sym0,
+      token1Symbol: sym1,
+    })
+  ) {
+    logger.debug(
+      `[LP] Alert evaluation deferred tokenId=${tokenId} on ${chainId}; token metadata unresolved`
+    );
     return;
   }
 
@@ -2201,6 +2305,14 @@ async function describeLpFromSnapshot(row, snapshot, options = {}) {
     return;
   }
 
+  const snapshotStatus = String(snapshot.status || snapshot.rangeStatus || "UNKNOWN").toUpperCase();
+  if (snapshotStatus !== "INACTIVE" && !hasResolvedLpTokenMetadata(snapshot)) {
+    logger.debug(
+      `[LP] Snapshot alert evaluation deferred tokenId=${tokenId} on ${chainId}; token metadata unresolved`
+    );
+    return;
+  }
+
   const tickLower = Number(snapshot.tickLower);
   const tickUpper = Number(snapshot.tickUpper);
   const baseTick = Number(snapshot.currentTick);
@@ -2358,6 +2470,7 @@ async function monitorLPs(options = {}) {
           contractId: row.contractId,
           tokenId: row.tokenId,
         });
+        seedTokenMetadataFromSnapshot(snap);
 
         const snapshotFresh = isSnapshotFresh(snap?.snapshotAt);
         if (snapshotFresh) {
