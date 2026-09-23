@@ -55,6 +55,7 @@ function appendAndSummarizeMetrics(entry) {
     count: elapsed.length,
     ok_count: runs.filter((r) => r.ok === 1).length,
     fail_count: runs.filter((r) => r.ok === 0).length,
+    degraded_count: runs.filter((r) => Number(r?.degraded) === 1).length,
     skipped_count: runs.filter((r) => Number(r?.skipped) === 1).length,
     min_ms: elapsed.length ? elapsed[0] : null,
     p50_ms: percentile(elapsed, 50),
@@ -129,6 +130,8 @@ const runStartMs = Date.now();
 const runStartIso = new Date(runStartMs).toISOString();
 
 async function main() {
+  const degradedStages = [];
+
   logger.info("[indexPipelineCycle] start");
   if (isLockActive(INTEGRITY_LOCK_NAME)) {
     logger.warn("[indexPipelineCycle] integrity run is active, skipping this cycle");
@@ -148,36 +151,77 @@ async function main() {
   }
 
   // Phase 1: index tail
-  logger.info("[indexPipelineCycle] stage 1/8: index tail FLR");
+  logger.info("[indexPipelineCycle] stage 1/10: index tail FLR");
   await runNodeScript("jobs/indexTail.js", ["--chain=FLR"]);
 
-  logger.info("[indexPipelineCycle] stage 2/8: index tail XDC");
-  await runNodeScript("jobs/indexTail.js", ["--chain=XDC"]);
+  logger.info("[indexPipelineCycle] stage 2/10: index tail XDC");
+  try {
+    await runNodeScript("jobs/indexTail.js", ["--chain=XDC"]);
+  } catch (err) {
+    const error = String(err?.message || err);
+    degradedStages.push({ stage: "index_tail_xdc", error });
+    logger.warn(
+      `[indexPipelineCycle] stage 2/10 degraded: XDC index tail failed; continuing remaining pipeline stages: ${error}`
+    );
+  }
 
   // Phase 2: derive indexed ownership
-  logger.info("[indexPipelineCycle] stage 3/8: derive NFT FLR");
+  logger.info("[indexPipelineCycle] stage 3/10: derive NFT FLR");
   await runNodeScript("jobs/deriveNftStateFromEvents.js", ["--chain=FLR"]);
 
-  logger.info("[indexPipelineCycle] stage 4/8: derive NFT XDC");
+  logger.info("[indexPipelineCycle] stage 4/10: derive NFT XDC");
   await runNodeScript("jobs/deriveNftStateFromEvents.js", ["--chain=XDC"]);
 
   // Phase 3: derive ALM share flow ledger
-  logger.info("[indexPipelineCycle] stage 5/8: derive ALM flows FLR");
+  logger.info("[indexPipelineCycle] stage 5/10: derive ALM flows FLR");
   await runNodeScript("jobs/deriveAlmFlowsFromEvents.js", ["--chain=FLR"]);
 
-  logger.info("[indexPipelineCycle] stage 6/8: derive ALM flows XDC");
+  logger.info("[indexPipelineCycle] stage 6/10: derive ALM flows XDC");
   await runNodeScript("jobs/deriveAlmFlowsFromEvents.js", ["--chain=XDC"]);
 
   // Phase 4: loan redemption event indexing
-  logger.info("[indexPipelineCycle] stage 7/8: scan loan redemption events");
+  logger.info("[indexPipelineCycle] stage 7/10: scan loan redemption events");
   await runNodeScript("jobs/scanLoanRedemptionEvents.js");
 
   // Phase 5: refresh snapshots/alerts (with INDEXER_SKIP_DIRECT_SCAN=1 expected)
-  logger.info("[indexPipelineCycle] stage 8/8: scan + snapshot refresh");
+  logger.info("[indexPipelineCycle] stage 8/10: scan + snapshot refresh");
   await runNodeScript("jobs/scanLoanLpPositions.js");
 
+  // Phase 6: refresh tracked Stability Pool positions. This remains non-blocking
+  // so an SP-specific RPC or contract issue cannot stall the core index pipeline.
+  logger.info("[indexPipelineCycle] stage 9/10: scan Stability Pool positions");
+  try {
+    await runNodeScript("jobs/scanStabilityPoolPositions.js");
+  } catch (err) {
+    const error = String(err?.message || err);
+    degradedStages.push({ stage: "scan_stability_pool_positions", error });
+    logger.warn(
+      `[indexPipelineCycle] stage 9/10 degraded: Stability Pool position scan failed; completing pipeline with prior SP snapshots preserved: ${error}`
+    );
+  }
+
+  // Phase 7: refresh SP market/rate snapshots only when their configured
+  // polling interval has elapsed. Each pool tracks its own due state.
+  logger.info("[indexPipelineCycle] stage 10/10: collect due Stability Pool market snapshots");
+  try {
+    await runNodeScript("jobs/collectStabilityPoolSnapshots.js", ["--if-due"]);
+  } catch (err) {
+    const error = String(err?.message || err);
+    degradedStages.push({ stage: "collect_stability_pool_snapshots", error });
+    logger.warn(
+      `[indexPipelineCycle] stage 10/10 degraded: Stability Pool market snapshot collection failed; completing pipeline with prior market snapshots preserved: ${error}`
+    );
+  }
+
   const elapsed = Date.now() - runStartMs;
-  logger.info(`[indexPipelineCycle] done (elapsed ${elapsed} ms)`);
+  const degraded = degradedStages.length > 0;
+  if (degraded) {
+    logger.warn(
+      `[indexPipelineCycle] done degraded stages=${degradedStages.map((item) => item.stage).join(",")} (elapsed ${elapsed} ms)`
+    );
+  } else {
+    logger.info(`[indexPipelineCycle] done (elapsed ${elapsed} ms)`);
+  }
 
   const summary = appendAndSummarizeMetrics({
     started_at: runStartIso,
@@ -185,9 +229,11 @@ async function main() {
     elapsed_ms: elapsed,
     ok: 1,
     skipped: 0,
+    degraded: degraded ? 1 : 0,
+    degraded_stages: degradedStages,
   });
   logger.info(
-    `[indexPipelineCycle] metrics count=${summary.count} skipped=${summary.skipped_count} p50=${summary.p50_ms}ms p95=${summary.p95_ms}ms max=${summary.max_ms}ms file=${METRICS_SUMMARY}`
+    `[indexPipelineCycle] metrics count=${summary.count} degraded=${summary.degraded_count} skipped=${summary.skipped_count} p50=${summary.p50_ms}ms p95=${summary.p95_ms}ms max=${summary.max_ms}ms file=${METRICS_SUMMARY}`
   );
 }
 

@@ -12,6 +12,7 @@ const { getDb } = require("../db");
 const { getProviderForChain } = require("../utils/ethers/providers");
 const baseLogger = require("../utils/logger");
 const logger = baseLogger.forEnv("SCAN_DEBUG");
+const { acquireLock, releaseLock } = require("../utils/lock");
 const { getStabilityPoolsForChain } = require("../utils/stabilityPoolConfig");
 const {
   fetchJsonWithTimeout,
@@ -22,6 +23,7 @@ const {
 const CHAINS_CONFIG = {
   FLR: { rpcEnvKey: "FLR_MAINNET" },
 };
+const LOCK_NAME = "sp-snapshot";
 
 function requireEnv(name) {
   const raw = process.env[name];
@@ -54,11 +56,40 @@ function computeIndexValue(scaleBValue, pValue) {
   return Number(scaled) / 1000000;
 }
 
-async function collectForChain(chainId) {
+function parseSqliteUtcMs(raw) {
+  if (!raw) return null;
+  const normalized = String(raw).includes("T") ? String(raw) : String(raw).replace(" ", "T");
+  const ms = Date.parse(normalized.endsWith("Z") ? normalized : `${normalized}Z`);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function getDuePoolKeys(db, chainId, pools, intervalMinutes) {
+  const latestRows = db.prepare(`
+    SELECT pool_key, MAX(created_at) AS latest_at
+    FROM sp_apr_snapshots
+    WHERE chain_id = ?
+    GROUP BY pool_key
+  `).all(chainId);
+  const latestByPool = new Map(latestRows.map((row) => [row.pool_key, parseSqliteUtcMs(row.latest_at)]));
+  const cutoffMs = Date.now() - intervalMinutes * 60 * 1000;
+
+  return pools
+    .filter((pool) => {
+      const latestMs = latestByPool.get(pool.key);
+      return !Number.isFinite(latestMs) || latestMs <= cutoffMs;
+    })
+    .map((pool) => pool.key);
+}
+
+async function collectForChain(chainId, poolKeys = null) {
   const cid = String(chainId || "").toUpperCase();
-  const pools = getStabilityPoolsForChain(cid);
+  const configuredPools = getStabilityPoolsForChain(cid);
+  const selectedKeys = Array.isArray(poolKeys) ? new Set(poolKeys) : null;
+  const pools = selectedKeys
+    ? configuredPools.filter((pool) => selectedKeys.has(pool.key))
+    : configuredPools;
   if (!pools.length) {
-    logger.info(`[sp-snapshot] No configured pools for ${cid}; nothing to do.`);
+    logger.info(`[sp-snapshot] No pools due for ${cid}; nothing to do.`);
     return { saved: 0, failed: 0 };
   }
 
@@ -153,15 +184,39 @@ async function collectForChain(chainId) {
 }
 
 async function main() {
-  logger.info("[sp-snapshot] Starting stability-pool snapshot collection...");
-  const started = Date.now();
-  const result = await collectForChain("FLR");
-  const elapsed = Date.now() - started;
-  logger.info(
-    `[sp-snapshot] Done saved=${result.saved} failed=${result.failed} elapsedMs=${elapsed}`
-  );
-  if (!result.saved) {
-    process.exitCode = 1;
+  const lockPath = acquireLock(LOCK_NAME);
+  if (!lockPath) {
+    logger.warn("[sp-snapshot] Previous run still active; skipping.");
+    return;
+  }
+
+  try {
+    const chainId = "FLR";
+    let poolKeys = null;
+    if (process.argv.includes("--if-due")) {
+      const intervalMinutes = requireNumberEnv("SP_APR_POLL_MIN");
+      const db = getDb();
+      const pools = getStabilityPoolsForChain(chainId);
+      poolKeys = getDuePoolKeys(db, chainId, pools, intervalMinutes);
+      if (!poolKeys.length) {
+        logger.info(`[sp-snapshot] Skipped; all ${chainId} pools are newer than ${intervalMinutes} minutes.`);
+        return;
+      }
+      logger.info(`[sp-snapshot] Due pools=${poolKeys.join(",")} intervalMin=${intervalMinutes}`);
+    }
+
+    logger.info("[sp-snapshot] Starting stability-pool snapshot collection...");
+    const started = Date.now();
+    const result = await collectForChain(chainId, poolKeys);
+    const elapsed = Date.now() - started;
+    logger.info(
+      `[sp-snapshot] Done saved=${result.saved} failed=${result.failed} elapsedMs=${elapsed}`
+    );
+    if (!result.saved) {
+      process.exitCode = 1;
+    }
+  } finally {
+    releaseLock(lockPath);
   }
 }
 
