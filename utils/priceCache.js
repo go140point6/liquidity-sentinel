@@ -61,10 +61,10 @@ async function fetchLiquityPrices(url) {
   return out;
 }
 
-async function fetchCryptoCompareXdc() {
-  const url = "https://min-api.cryptocompare.com/data/price?fsym=XDC&tsyms=USDT";
+async function fetchCoinGeckoXdc() {
+  const url = "https://api.coingecko.com/api/v3/simple/price?ids=xdce-crowd-sale&vs_currencies=usd";
   const json = await fetchJson(url);
-  const n = Number(json?.USDT);
+  const n = Number(json?.["xdce-crowd-sale"]?.usd);
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
@@ -182,18 +182,18 @@ async function refreshPriceCache(db, symbolsByChain) {
 
   if (xdcTargets.length) {
     try {
-      const xdcPrice = await fetchCryptoCompareXdc();
+      const xdcPrice = await fetchCoinGeckoXdc();
       if (Number.isFinite(xdcPrice)) {
-        logger.debug(`[priceCache] cryptocompare XDC price: ${xdcPrice}`);
+        logger.debug(`[priceCache] coingecko XDC price: ${xdcPrice}`);
       }
       if (Number.isFinite(xdcPrice) && xdcPrice > 0) {
         for (const t of xdcTargets) {
-          upsertPrice(db, t.chainId, t.symbol, xdcPrice, "cryptocompare");
+          upsertPrice(db, t.chainId, t.symbol, xdcPrice, "coingecko");
           resolved.add(`${t.chainId}|${t.symbol}`);
         }
       }
     } catch (err) {
-      logger.warn(`[priceCache] cryptocompare fetch failed: ${err.message || err}`);
+      logger.warn(`[priceCache] coingecko fetch failed: ${err.message || err}`);
     }
   }
 
