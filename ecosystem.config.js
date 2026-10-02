@@ -13,37 +13,6 @@ module.exports = {
       },
     },
     {
-      name: "scan-loan-lp",
-      script: "jobs/scanLoanLpPositions.js",
-      interpreter: "node",
-      autorestart: false,
-      cron_restart: "2,10,18,26,34,42,50,58 * * * *",
-      time: true,
-      env: {
-        NODE_ENV: "production",
-      },
-    },
-    {
-      name: "index-tail",
-      script: "jobs/indexTail.js",
-      interpreter: "node",
-      autorestart: false,
-      time: true,
-      env: {
-        NODE_ENV: "production",
-      },
-    },
-    {
-      name: "index-derive-nft",
-      script: "jobs/deriveNftStateFromEvents.js",
-      interpreter: "node",
-      autorestart: false,
-      time: true,
-      env: {
-        NODE_ENV: "production",
-      },
-    },
-    {
       name: "primefi-market-tail",
       script: "jobs/scanPrimefiMarketEvents.js",
       interpreter: "node",
