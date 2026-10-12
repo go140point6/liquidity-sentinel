@@ -1,0 +1,64 @@
+const fs = require("node:fs");
+const path = require("node:path");
+const dotenv = require("dotenv");
+const fileEnv = dotenv.parse(fs.readFileSync(path.join(__dirname, ".env")));
+const runtimeEnv = { NODE_ENV: "production" };
+for (const key of ["DEBUG", "SCAN_DEBUG"]) {
+  if (fileEnv[key] != null) runtimeEnv[key] = fileEnv[key];
+}
+
+module.exports = {
+  apps: [
+    {
+      name: "liquidity-sentinel",
+      cwd: "/home/user/liquidity-sentinel",
+      script: "index.js",
+      interpreter: "/home/user/.nvm/versions/node/v24.21.0/bin/node",
+      exec_mode: "fork",
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      time: true,
+      env: { ...runtimeEnv },
+    },
+    {
+      name: "index-cycle",
+      cwd: "/home/user/liquidity-sentinel",
+      script: "jobs/indexPipelineCycle.js",
+      interpreter: "/home/user/.nvm/versions/node/v24.21.0/bin/node",
+      exec_mode: "fork",
+      instances: 1,
+      autorestart: false,
+      cron_restart: "0,8,16,24,32,40,48,56 * * * *",
+      watch: false,
+      time: true,
+      env: { ...runtimeEnv },
+    },
+    {
+      name: "primefi-market-tail",
+      cwd: "/home/user/liquidity-sentinel",
+      script: "jobs/scanPrimefiMarketEvents.js",
+      interpreter: "/home/user/.nvm/versions/node/v24.21.0/bin/node",
+      exec_mode: "fork",
+      instances: 1,
+      autorestart: false,
+      cron_restart: "6,36 * * * *",
+      watch: false,
+      time: true,
+      env: { ...runtimeEnv },
+    },
+    {
+      name: "index-daily-integrity",
+      cwd: "/home/user/liquidity-sentinel",
+      script: "jobs/indexDailyIntegrity.js",
+      interpreter: "/home/user/.nvm/versions/node/v24.21.0/bin/node",
+      exec_mode: "fork",
+      instances: 1,
+      autorestart: false,
+      cron_restart: "37 */4 * * *",
+      watch: false,
+      time: true,
+      env: { ...runtimeEnv, NODE_OPTIONS: "--max-old-space-size=3072" },
+    },
+  ],
+};

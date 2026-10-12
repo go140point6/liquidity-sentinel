@@ -136,3 +136,4 @@ ecosystem.config.js
 locks/
 data/metrics/
 .env-prod
+ecosystem.config.js
