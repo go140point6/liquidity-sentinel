@@ -139,6 +139,10 @@ Integrity run coordination:
 - If the wait exceeds the max window, integrity records a skipped run summary instead of failing.
 - While integrity is active, `indexPipelineCycle` skips overlapping runs.
 
+## PM2 scan scheduling
+
+The recurring Sentinel scan processes are long-lived PM2 scheduler wrappers. Each wrapper stays online, starts its one-shot job on process startup, and uses `node-cron` for its recurring wall-clock schedule. A failed child run is logged and does not disable later runs; PM2 restarts the wrapper if the scheduler itself exits. The one-shot index cycle retains its database lock as a second guard against overlapping executions.
+
 ## Notes
 
 - Writes are idempotent on `(chain_id, tx_hash, log_index)` in `chain_events`.

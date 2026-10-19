@@ -8,6 +8,9 @@ require("dotenv").config({
 const { ethers } = require("ethers");
 
 const stabilityPoolAbi = require("../abi/stabilityPool.json");
+const collateralTokenAbi = [
+  "function decimals() view returns (uint8)",
+];
 const { getDb } = require("../db");
 const { getProviderForChain } = require("../utils/ethers/providers");
 const baseLogger = require("../utils/logger");
@@ -64,6 +67,10 @@ function percentOf(total, part) {
 
 function format18(raw) {
   return Number(ethers.formatUnits(toBigInt(raw), 18));
+}
+
+function formatUnits(raw, decimals) {
+  return Number(ethers.formatUnits(toBigInt(raw), decimals));
 }
 
 function extractInitialDeposit(rawResult) {
@@ -128,8 +135,25 @@ async function main() {
     `);
 
     const contracts = new Map();
+    const collateralDecimals = new Map();
     for (const pool of pools) {
-      contracts.set(pool.key, new ethers.Contract(pool.address, stabilityPoolAbi, provider));
+      const contract = new ethers.Contract(pool.address, stabilityPoolAbi, provider);
+      contracts.set(pool.key, contract);
+      const tokenAddress = await withTimeout(
+        contract.collToken(),
+        rpcTimeoutMs,
+        `${pool.key}.collToken`
+      );
+      const token = new ethers.Contract(tokenAddress, collateralTokenAbi, provider);
+      const decimals = Number(await withTimeout(
+        token.decimals(),
+        rpcTimeoutMs,
+        `${pool.key}.collToken.decimals`
+      ));
+      if (!Number.isInteger(decimals) || decimals < 0 || decimals > 255) {
+        throw new Error(`Invalid collateral token decimals for ${pool.key}: ${decimals}`);
+      }
+      collateralDecimals.set(pool.key, decimals);
     }
 
     let activeCount = 0;
@@ -137,6 +161,7 @@ async function main() {
 
     for (const pool of pools) {
       const contract = contracts.get(pool.key);
+      const collDecimals = collateralDecimals.get(pool.key);
       const totalBoldDeposits = await withTimeout(
         contract.getTotalBoldDeposits(),
         rpcTimeoutMs,
@@ -183,6 +208,7 @@ async function main() {
             poolAddress: pool.address,
             poolLabel: pool.label,
             collSymbol: pool.collSymbol || getPoolShortLabel(pool),
+            collDecimals,
             initialDepositRaw: initialDepositRaw.toString(),
             initialDeposit: format18(initialDepositRaw),
             compoundedDepositRaw: compoundedRaw.toString(),
@@ -190,11 +216,11 @@ async function main() {
             yieldGainRaw: yieldRaw.toString(),
             yieldGain: format18(yieldRaw),
             collateralGainRaw: collGainRaw.toString(),
-            collateralGain: format18(collGainRaw),
+            collateralGain: formatUnits(collGainRaw, collDecimals),
             stashedCollateralRaw: stashedCollRaw.toString(),
-            stashedCollateral: format18(stashedCollRaw),
+            stashedCollateral: formatUnits(stashedCollRaw, collDecimals),
             claimableCollateralRaw: collClaimableRaw.toString(),
-            claimableCollateral: format18(collClaimableRaw),
+            claimableCollateral: formatUnits(collClaimableRaw, collDecimals),
             totalPoolDepositsRaw: totalBoldDeposits.toString(),
             totalPoolDeposits: format18(totalBoldDeposits),
             poolSharePct: percentOf(totalBoldDeposits, compoundedRaw),
