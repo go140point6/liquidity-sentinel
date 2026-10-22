@@ -137,3 +137,5 @@ locks/
 data/metrics/
 .env-prod
 ecosystem.config.js
+
+data/datasource-watchdog-state.json*

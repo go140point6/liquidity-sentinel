@@ -10,6 +10,20 @@ for (const key of ["DEBUG", "SCAN_DEBUG"]) {
 module.exports = {
   apps: [
     {
+      name: "datasource-watchdog",
+      cwd: "/home/user/liquidity-sentinel",
+      script: "jobs/datasourceWatchdog.js",
+      interpreter: "/home/user/.nvm/versions/node/v24.22.1/bin/node",
+      exec_mode: "fork",
+      instances: 1,
+      autorestart: true,
+      restart_delay: 30000,
+      kill_timeout: 20000,
+      watch: false,
+      time: true,
+      env: { ...runtimeEnv },
+    },
+    {
       name: "liquidity-sentinel",
       cwd: "/home/user/liquidity-sentinel",
       script: "index.js",
