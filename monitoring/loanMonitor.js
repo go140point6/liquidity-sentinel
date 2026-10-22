@@ -1257,7 +1257,11 @@ async function getLoanSummaries(userId = null) {
 
 async function refreshLoanSnapshots() {
   const runId = String(Date.now());
-  await refreshPrimefiLoanSnapshots(runId);
+  try {
+    await refreshPrimefiLoanSnapshots(runId);
+  } catch (e) {
+    logger.warn(`[loanMonitor] PrimeFi snapshot refresh failed; continuing loan snapshots: ${e?.message || e}`);
+  }
   const rows = getMonitoredLoanRows();
   const sharedContractContext = new Map();
   if (!rows.length) {

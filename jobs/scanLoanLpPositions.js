@@ -255,10 +255,15 @@ async function getLogsWithRetry(provider, filter, { maxAttempts = 6 } = {}) {
 }
 
 function providerForChain(chainId) {
-  if (chainId === "FLR") return new ethers.JsonRpcProvider(FLR_RPC_URL);
-  if (chainId === "XDC") return new ethers.JsonRpcProvider(XDC_RPC_URL);
-  throw new Error(`Unsupported chain_id: ${chainId}`);
+  let provider;
+  if (chainId === "FLR") provider = new ethers.JsonRpcProvider(FLR_RPC_URL);
+  else if (chainId === "XDC") provider = new ethers.JsonRpcProvider(XDC_RPC_URL);
+  else throw new Error(`Unsupported chain_id: ${chainId}`);
+  activeProviders.add(provider);
+  return provider;
 }
+
+const activeProviders = new Set();
 
 async function initProvider(chainId, { maxAttempts = 3, backoffMs = 1000 } = {}) {
   let attempt = 0;
@@ -270,6 +275,8 @@ async function initProvider(chainId, { maxAttempts = 3, backoffMs = 1000 } = {})
       await provider.getNetwork();
       return provider;
     } catch (err) {
+      try { provider.destroy(); } catch (_) {}
+      activeProviders.delete(provider);
       logger.warn(
         `[scanLoanLpPositions] ${chainId} provider init failed (attempt ${attempt}/${maxAttempts}): ${err?.message || err}`
       );
@@ -570,14 +577,22 @@ async function discoverAlmVaultsForSource(db, provider, src) {
 
 async function discoverAlmVaults(db, providerByChain, chainFilter = null) {
   const chainIds = chainFilter ? [chainFilter] : ["FLR", "XDC"];
+  const errors = [];
   for (const chainId of chainIds) {
     const sources = getAlmDiscoveriesForChain(chainId);
     if (!sources.length) continue;
-    const provider = providerByChain[chainId] || (providerByChain[chainId] = await initProvider(chainId));
-    for (const src of sources) {
-      await discoverAlmVaultsForSource(db, provider, src);
+    try {
+      const provider = providerByChain[chainId] || (providerByChain[chainId] = await initProvider(chainId));
+      for (const src of sources) {
+        await discoverAlmVaultsForSource(db, provider, src);
+      }
+    } catch (err) {
+      const message = String(err?.message || err);
+      errors.push({ chainId, message });
+      logger.warn(`[scanLoanLpPositions] ${chainId} ALM discovery failed; continuing other chains: ${message}`);
     }
   }
+  return errors;
 }
 
 // =========================================================
@@ -840,7 +855,15 @@ async function refreshRedemptionRateSnapshots(
     }
 
     const chainId = c.chain_id;
-    const provider = providers[chainId] || (providers[chainId] = await initProvider(chainId));
+    let provider;
+    try {
+      provider = providers[chainId] || (providers[chainId] = await initProvider(chainId));
+    } catch (err) {
+      logger.warn(
+        `[scanLoanLpPositions] redemption-rate snapshot skipped for ${c.protocol} on ${chainId}: ${err?.message || err}`
+      );
+      continue;
+    }
     const sharedKey = `${chainId}:${c.contract_id}`;
     const sharedCtx =
       sharedLoanContractContext && typeof sharedLoanContractContext.get === "function"
@@ -1262,7 +1285,7 @@ async function main() {
     try {
       const chainFilter = chain ? chain.toUpperCase() : null;
       const discoveryProviders = {};
-      await discoverAlmVaults(db, discoveryProviders, chainFilter);
+      const discoveryErrors = await discoverAlmVaults(db, discoveryProviders, chainFilter);
 
       const contracts = selectContracts(db, {
         chainId: chainFilter,
@@ -1281,9 +1304,20 @@ async function main() {
       } else {
         for (const c of contracts) {
           if (!providers[c.chain_id]) {
-            providers[c.chain_id] = await initProvider(c.chain_id);
+            try {
+              providers[c.chain_id] = await initProvider(c.chain_id);
+            } catch (err) {
+              discoveryErrors.push({ chainId: c.chain_id, message: String(err?.message || err) });
+              logger.warn(`[scanLoanLpPositions] ${c.chain_id} provider unavailable; continuing other chains: ${err?.message || err}`);
+              continue;
+            }
           }
-          await scanContract(db, providers[c.chain_id], c);
+          try {
+            await scanContract(db, providers[c.chain_id], c);
+          } catch (err) {
+            discoveryErrors.push({ chainId: c.chain_id, message: String(err?.message || err) });
+            logger.warn(`[scanLoanLpPositions] ${c.chain_id} contract scan failed for ${c.contract_key}; continuing: ${err?.message || err}`);
+          }
         }
       }
 
@@ -1440,10 +1474,19 @@ async function main() {
         logger.debug("[scanLoanLpPositions] advanced heavy refresh phase cursor");
       }
       log("[scanLoanLpPositions] Snapshot refresh complete.");
+      if (discoveryErrors.length) {
+        throw new Error(
+          `ALM discovery failed for ${discoveryErrors.map((item) => item.chainId).join(", ")}`
+        );
+      }
     } finally {
       db.close();
     }
   } finally {
+    for (const provider of activeProviders) {
+      try { provider.destroy(); } catch (_) {}
+    }
+    activeProviders.clear();
     const elapsed = Date.now() - t0;
     logger.info(`⏹️  ${runLabel} end (elapsed ${elapsed} ms)`);
   }

@@ -16,6 +16,17 @@ const INTEGRITY_LOCK_NAME = "index-daily-integrity";
 const METRICS_DIR = path.join(__dirname, "..", "data", "metrics");
 const METRICS_JSONL = path.join(METRICS_DIR, "index-cycle-runs.jsonl");
 const METRICS_SUMMARY = path.join(METRICS_DIR, "index-cycle-summary.json");
+const DEFAULT_STAGE_TIMEOUT_MS = 5 * 60 * 1000;
+
+function getStageTimeoutMs() {
+  const raw = process.env.INDEX_PIPELINE_STAGE_TIMEOUT_MS;
+  if (raw == null || raw === "") return DEFAULT_STAGE_TIMEOUT_MS;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error("INDEX_PIPELINE_STAGE_TIMEOUT_MS must be a positive integer");
+  }
+  return value;
+}
 
 function ensureMetricsDir() {
   fs.mkdirSync(METRICS_DIR, { recursive: true });
@@ -74,6 +85,8 @@ if (!lockPath) {
 }
 
 let lockReleased = false;
+let activeChild = null;
+let shutdownCode = null;
 function safeReleaseLock() {
   if (lockReleased) return;
   lockReleased = true;
@@ -83,14 +96,25 @@ function safeReleaseLock() {
 }
 
 process.once("exit", safeReleaseLock);
-process.once("SIGINT", () => {
-  safeReleaseLock();
-  process.exit(130);
-});
-process.once("SIGTERM", () => {
-  safeReleaseLock();
-  process.exit(143);
-});
+function handleShutdown(signal, code) {
+  shutdownCode = code;
+  process.exitCode = code;
+  if (!activeChild) {
+    safeReleaseLock();
+    return;
+  }
+  logger.warn(`[indexPipelineCycle] received ${signal}; forwarding to active stage process`);
+  activeChild.kill(signal);
+  const childToStop = activeChild;
+  const killTimer = setTimeout(() => {
+    if (activeChild === childToStop) childToStop.kill("SIGKILL");
+  }, 10_000);
+  killTimer.unref();
+  childToStop.once("exit", () => clearTimeout(killTimer));
+}
+
+process.once("SIGINT", () => handleShutdown("SIGINT", 130));
+process.once("SIGTERM", () => handleShutdown("SIGTERM", 143));
 process.once("uncaughtException", (err) => {
   logger.error("[indexPipelineCycle] FATAL (uncaughtException):", err);
   safeReleaseLock();
@@ -103,27 +127,66 @@ process.once("unhandledRejection", (err) => {
 });
 
 function runNodeScript(scriptRelPath, args = []) {
+  if (shutdownCode != null) {
+    return Promise.reject(new Error(`pipeline shutting down (exit ${shutdownCode})`));
+  }
   return new Promise((resolve, reject) => {
     const scriptPath = path.join(__dirname, "..", scriptRelPath);
+    const timeoutMs = getStageTimeoutMs();
     const child = spawn(process.execPath, [scriptPath, ...args], {
       cwd: path.join(__dirname, ".."),
       env: process.env,
       stdio: "inherit",
     });
+    activeChild = child;
 
-    child.on("error", reject);
+    let settled = false;
+    let killTimer = null;
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      if (activeChild === child) activeChild = null;
+      clearTimeout(timeout);
+      if (killTimer) clearTimeout(killTimer);
+      if (err) reject(err);
+      else resolve();
+    };
+    const timeout = setTimeout(() => {
+      logger.warn(`[indexPipelineCycle] ${scriptRelPath} exceeded ${timeoutMs}ms; sending SIGTERM`);
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => {
+        if (!settled) {
+          logger.warn(`[indexPipelineCycle] ${scriptRelPath} did not stop after SIGTERM; sending SIGKILL`);
+          child.kill("SIGKILL");
+        }
+      }, 10_000);
+      killTimer.unref();
+    }, timeoutMs);
+    timeout.unref();
+
+    child.on("error", (err) => finish(err));
     child.on("exit", (code, signal) => {
       if (signal) {
-        reject(new Error(`${scriptRelPath} terminated by signal ${signal}`));
+        finish(new Error(`${scriptRelPath} terminated by signal ${signal}`));
         return;
       }
       if (code !== 0) {
-        reject(new Error(`${scriptRelPath} exited with code ${code}`));
+        finish(new Error(`${scriptRelPath} exited with code ${code}`));
         return;
       }
-      resolve();
+      finish();
     });
   });
+}
+
+async function runIndependentStage(stage, script, args, degradedStages) {
+  try {
+    await runNodeScript(script, args);
+  } catch (err) {
+    const error = String(err?.message || err);
+    degradedStages.push({ stage, error });
+    logger.warn(`[indexPipelineCycle] ${stage} degraded; continuing: ${error}`);
+  }
 }
 
 const runStartMs = Date.now();
@@ -152,36 +215,29 @@ async function main() {
 
   // Phase 1: index tail
   logger.info("[indexPipelineCycle] stage 1/10: index tail FLR");
-  await runNodeScript("jobs/indexTail.js", ["--chain=FLR"]);
+  await runIndependentStage("index_tail_flr", "jobs/indexTail.js", ["--chain=FLR"], degradedStages);
 
   logger.info("[indexPipelineCycle] stage 2/10: index tail XDC");
-  try {
-    await runNodeScript("jobs/indexTail.js", ["--chain=XDC"]);
-  } catch (err) {
-    const error = String(err?.message || err);
-    degradedStages.push({ stage: "index_tail_xdc", error });
-    logger.warn(
-      `[indexPipelineCycle] stage 2/10 degraded: XDC index tail failed; continuing remaining pipeline stages: ${error}`
-    );
-  }
+  await runIndependentStage("index_tail_xdc", "jobs/indexTail.js", ["--chain=XDC"], degradedStages);
 
   // Phase 2: derive indexed ownership
   logger.info("[indexPipelineCycle] stage 3/10: derive NFT FLR");
-  await runNodeScript("jobs/deriveNftStateFromEvents.js", ["--chain=FLR"]);
+  await runIndependentStage("derive_nft_flr", "jobs/deriveNftStateFromEvents.js", ["--chain=FLR"], degradedStages);
 
   logger.info("[indexPipelineCycle] stage 4/10: derive NFT XDC");
-  await runNodeScript("jobs/deriveNftStateFromEvents.js", ["--chain=XDC"]);
+  await runIndependentStage("derive_nft_xdc", "jobs/deriveNftStateFromEvents.js", ["--chain=XDC"], degradedStages);
 
   // Phase 3: derive ALM share flow ledger
   logger.info("[indexPipelineCycle] stage 5/10: derive ALM flows FLR");
-  await runNodeScript("jobs/deriveAlmFlowsFromEvents.js", ["--chain=FLR"]);
+  await runIndependentStage("derive_alm_flows_flr", "jobs/deriveAlmFlowsFromEvents.js", ["--chain=FLR"], degradedStages);
 
   logger.info("[indexPipelineCycle] stage 6/10: derive ALM flows XDC");
-  await runNodeScript("jobs/deriveAlmFlowsFromEvents.js", ["--chain=XDC"]);
+  await runIndependentStage("derive_alm_flows_xdc", "jobs/deriveAlmFlowsFromEvents.js", ["--chain=XDC"], degradedStages);
 
   // Phase 4: loan redemption event indexing
   logger.info("[indexPipelineCycle] stage 7/10: scan loan redemption events");
-  await runNodeScript("jobs/scanLoanRedemptionEvents.js");
+  await runIndependentStage("loan_redemption_events_flr", "jobs/scanLoanRedemptionEvents.js", ["--chain=FLR"], degradedStages);
+  await runIndependentStage("loan_redemption_events_xdc", "jobs/scanLoanRedemptionEvents.js", ["--chain=XDC"], degradedStages);
 
   // Phase 5: refresh snapshots/alerts (with INDEXER_SKIP_DIRECT_SCAN=1 expected)
   logger.info("[indexPipelineCycle] stage 8/10: scan + snapshot refresh");

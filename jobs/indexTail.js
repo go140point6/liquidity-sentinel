@@ -103,6 +103,7 @@ async function main() {
   db.pragma("foreign_keys = ON");
   db.pragma("busy_timeout = 5000");
 
+  const providers = {};
   try {
     syncTransferStreams(db, { chainId: chain, kind, contractKey });
 
@@ -122,8 +123,6 @@ async function main() {
       logger.info("[indexTail] no streams selected");
       return;
     }
-
-    const providers = {};
 
     for (const stream of streams) {
       const rpcUrl = getRpcUrl(stream.chain_id);
@@ -279,6 +278,9 @@ async function main() {
       }
     }
   } finally {
+    for (const provider of Object.values(providers)) {
+      try { provider.destroy(); } catch (_) {}
+    }
     db.close();
   }
 }

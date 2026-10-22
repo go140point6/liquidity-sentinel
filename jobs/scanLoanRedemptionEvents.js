@@ -565,6 +565,7 @@ async function main() {
   db.pragma("foreign_keys = ON");
   db.pragma("busy_timeout = 5000");
 
+  const providers = {};
   try {
     const rows = selectLoanContracts(db, { chainId: chain, contractKey, limit });
     if (!rows.length) {
@@ -572,7 +573,6 @@ async function main() {
       return;
     }
 
-    const providers = {};
     for (const row of rows) {
       const chainId = String(row.chain_id || "").toUpperCase();
       const provider =
@@ -580,6 +580,9 @@ async function main() {
       await scanContract(db, provider, row);
     }
   } finally {
+    for (const provider of Object.values(providers)) {
+      try { provider.destroy(); } catch (_) {}
+    }
     db.close();
     const elapsed = Date.now() - t0;
     logger.info(`[scanLoanRedemptionEvents] done (elapsed ${elapsed} ms)`);
